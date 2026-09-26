@@ -6,6 +6,9 @@ confusion matrix / precision / recall to update live without retraining, we inst
 treat predictions.csv (per-image gt_label + pred_score) as the source of truth and
 recompute everything with scikit-learn on demand.
 """
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 from sklearn.metrics import (
     confusion_matrix,
@@ -50,6 +53,25 @@ def compute_at_threshold(df: pd.DataFrame, threshold: float) -> dict:
         "f1_anomaly": float(f1[1]),
         "threshold": threshold,
     }
+
+
+def compute_run_range(run_dir, low_pct: float = 1.0, high_pct: float = 99.0) -> tuple[float, float]:
+    """Percentile-based (vmin, vmax) across every heatmap in a run, used to normalize the
+    anomaly heatmap overlay consistently across all images in that run (see heatmap.py's
+    module docstring for why per-image normalization is wrong). Computed once at training
+    time and stored in metrics.json; also usable as a fallback for older runs that predate
+    that, by rescanning the run's heatmaps/*.npy files directly.
+    """
+    heatmaps_dir = Path(run_dir) / "heatmaps"
+    all_values = [np.load(p).ravel() for p in heatmaps_dir.glob("*.npy")]
+    if not all_values:
+        return 0.0, 1.0
+    stacked = np.concatenate(all_values)
+    vmin = float(np.percentile(stacked, low_pct))
+    vmax = float(np.percentile(stacked, high_pct))
+    if vmax <= vmin:
+        vmax = vmin + 1e-6
+    return vmin, vmax
 
 
 def summarize(predictions_csv_path, threshold: float = 0.5) -> dict:

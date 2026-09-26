@@ -3,9 +3,11 @@ import random
 import streamlit as st
 
 from image_processing.app.state import require_project
+from image_processing.app.style import inject_global_css
 from image_processing.core import repository as repo
 
 st.set_page_config(page_title="Label Images", page_icon="🏷️", layout="wide")
+inject_global_css()
 project = require_project()
 
 st.title("Label Images")
@@ -14,6 +16,13 @@ images = repo.list_images(project)
 if not images:
     st.info("No images yet — import some on the Import Images page first.")
     st.stop()
+
+# Bumped whenever a bulk operation (e.g. auto-assign) rewrites labels/splits out from
+# under the per-image widgets below. Baked into their `key`s so Streamlit treats them as
+# fresh widgets on the next render instead of reusing a stale cached value and — since the
+# gallery loop's change-detection can't tell "stale cache" from "user edited it" — silently
+# writing that stale value straight back over the bulk update in the same rerun.
+generation = st.session_state.setdefault("label_gen", 0)
 
 st.subheader("Quick train/val split")
 st.caption(
@@ -32,6 +41,7 @@ if st.button("Auto-assign split from current labels"):
         repo.set_label(project, iid, split="val")
     for iid in anomaly_ids:
         repo.set_label(project, iid, split="val")
+    st.session_state["label_gen"] += 1
     st.success(f"Assigned {n_train} good images to train, the rest to val.")
     st.rerun()
 
@@ -61,14 +71,14 @@ for row_start in range(0, len(filtered), cols_per_row):
                 "Label",
                 ["unlabeled", "good", "anomaly"],
                 index=["unlabeled", "good", "anomaly"].index(label_entry["label"]),
-                key=f"label_{img['id']}",
+                key=f"label_{img['id']}_{generation}",
                 horizontal=True,
             )
             split = st.selectbox(
                 "Split",
                 ["unassigned", "train", "val"],
                 index=["unassigned", "train", "val"].index(label_entry["split"]),
-                key=f"split_{img['id']}",
+                key=f"split_{img['id']}_{generation}",
             )
             if label != label_entry["label"] or split != label_entry["split"]:
                 repo.set_label(project, img["id"], label=label, split=split)

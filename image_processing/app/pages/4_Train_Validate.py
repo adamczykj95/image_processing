@@ -6,6 +6,7 @@ import streamlit as st
 
 from image_processing.app.components.heatmap import overlay_heatmap
 from image_processing.app.state import require_project
+from image_processing.app.style import inject_global_css
 from image_processing.core import repository as repo
 from image_processing.core.config_schema import ModelConfig, PreprocessConfig, RunConfig
 from image_processing.ml import metrics as ml_metrics
@@ -13,6 +14,7 @@ from image_processing.ml.train import run_training
 from image_processing.preprocessing.pipeline import load_image, missing_cached_images
 
 st.set_page_config(page_title="Train / Validate", page_icon="🧠", layout="wide")
+inject_global_css()
 project = require_project()
 st.title("Train / Validate")
 
@@ -130,6 +132,26 @@ if run["status"].get("state") == "done" and predictions_path.exists():
     st.divider()
     show_heatmap = st.toggle("Show anomaly heatmap overlay", value=True)
     heatmap_alpha = st.slider("Heatmap opacity", 0.0, 1.0, 0.5, step=0.05, disabled=not show_heatmap)
+    heatmap_intensity = st.slider(
+        "Heatmap Color Intensity",
+        0.0,
+        1.0,
+        0.5,
+        step=0.05,
+        disabled=not show_heatmap,
+        help="0.5 = calibrated default. Lower mutes anomaly regions, higher makes them "
+        "pop more — adjusts visual contrast only, doesn't change the underlying scores.",
+    )
+
+    # Normalize every image's heatmap against the same run-wide range (stored at training
+    # time; recomputed on the fly for older runs that predate this) rather than each
+    # image's own min/max — otherwise a "good" image's low, boring values get stretched to
+    # fill the full color scale and look just as "hot" as a genuine anomaly.
+    heatmap_range = run["metrics"].get("heatmap_range")
+    if heatmap_range:
+        heatmap_vmin, heatmap_vmax = heatmap_range["vmin"], heatmap_range["vmax"]
+    else:
+        heatmap_vmin, heatmap_vmax = ml_metrics.compute_run_range(run_dir)
 
     df = ml_metrics.load_predictions(predictions_path)
     cache_for_run = project.preprocessing_cache_dir / run["config"]["preproc_hash"]
@@ -142,7 +164,14 @@ if run["status"].get("state") == "done" and predictions_path.exists():
             if show_heatmap:
                 heatmap_path = run_dir / "heatmaps" / f"{row['image_id']}.npy"
                 amap = np.load(heatmap_path)
-                display_image = overlay_heatmap(base_image, amap, alpha=heatmap_alpha)
+                display_image = overlay_heatmap(
+                    base_image,
+                    amap,
+                    vmin=heatmap_vmin,
+                    vmax=heatmap_vmax,
+                    alpha=heatmap_alpha,
+                    intensity=heatmap_intensity,
+                )
             else:
                 display_image = base_image
             st.image(display_image, width="stretch")

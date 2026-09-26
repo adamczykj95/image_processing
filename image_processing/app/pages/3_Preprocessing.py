@@ -2,8 +2,10 @@ import streamlit as st
 
 from image_processing.app.components import pipeline_builder
 from image_processing.app.state import require_project
+from image_processing.app.style import inject_global_css
 
 st.set_page_config(page_title="Preprocessing", page_icon="🧰", layout="wide")
+inject_global_css()
 project = require_project()
 
 st.title("Preprocessing Pipeline Builder")

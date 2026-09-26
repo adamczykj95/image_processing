@@ -14,6 +14,7 @@ from image_processing.core.config_schema import RunConfig
 from image_processing.core.project import Project
 from image_processing.core.store import write_json
 from image_processing.ml.datamodule import build_datamodule, materialize_run_data
+from image_processing.ml.metrics import compute_run_range
 
 
 def _set_status(run_dir: Path, state: str, message: str = "") -> None:
@@ -101,6 +102,8 @@ def run_training(project: Project, run_id: str, run_config: RunConfig) -> dict:
             writer.writeheader()
             writer.writerows(rows)
 
+        heatmap_vmin, heatmap_vmax = compute_run_range(run_dir)
+
         write_json(
             run_dir / "metrics.json",
             {
@@ -108,6 +111,7 @@ def run_training(project: Project, run_id: str, run_config: RunConfig) -> dict:
                 "ckpt_path": ckpt_path,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "n_predictions": len(rows),
+                "heatmap_range": {"vmin": heatmap_vmin, "vmax": heatmap_vmax},
             },
         )
 

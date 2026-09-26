@@ -3,9 +3,11 @@ from PIL import Image
 import streamlit as st
 
 from image_processing.app.state import require_project
+from image_processing.app.style import inject_global_css
 from image_processing.core import repository as repo
 
 st.set_page_config(page_title="Import Images", page_icon="📥", layout="wide")
+inject_global_css()
 project = require_project()
 
 st.title("Import Images")

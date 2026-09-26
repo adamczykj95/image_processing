@@ -3,9 +3,11 @@ from pathlib import Path
 import streamlit as st
 
 from image_processing.app.state import get_current_project, set_current_project
+from image_processing.app.style import inject_global_css
 from image_processing.core.project import Project
 
 st.set_page_config(page_title="Defect Detection", page_icon="🔍", layout="wide")
+inject_global_css()
 st.title("PatchCore Defect Detection")
 
 project = get_current_project()
