@@ -1,0 +1,22 @@
+[project]
+name = "image-processing"
+version = "0.1.0"
+description = "PatchCore-based industrial defect detection GUI"
+requires-python = ">=3.10"
+dependencies = [
+    "anomalib>=2.1,<3",
+    "streamlit>=1.38",
+    "opencv-python-headless>=4.9",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.8",
+    "pydantic>=2.6",
+    "pandas>=2.2",
+    "pillow>=10.2",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["image_processing*"]

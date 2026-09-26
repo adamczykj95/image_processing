@@ -1,0 +1,22 @@
+flowchart LR
+    A[["Import Images"]] --> B[["Label Images<br/>(good / anomaly)"]]
+    B --> H[["Train / Val Split"]]
+    B --> C
+
+    subgraph PIPE["Preprocessing Tool Chain — user-arranged, any order"]
+        direction LR
+        C[["Align<br/>(multi-ROI landmark match)"]]
+        D[["Crop"]]
+        E[["Resize"]]
+        F[["Brightness /<br/>Contrast"]]
+        G[["Color<br/>(RGB / Gray)"]]
+        C <--> D <--> E <--> F <--> G
+    end
+
+    H --> I
+    G --> I[["PatchCore Training<br/>(feature layers + coreset ratio)"]]
+    I --> J[["Validation Metrics<br/>AUROC · F1 · ROC · confusion matrix"]]
+    I --> K[["Hyperparameter Sweep<br/>grid → results table"]]
+    I --> L[["Inference<br/>on new images"]]
+    J --> M[["Anomaly Heatmap Overlay<br/>(toggle on/off)"]]
+    L --> M

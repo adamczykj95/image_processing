@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environment
+.venv/
+venv/
+
+# Project data — user-created projects (images, model checkpoints, run artifacts)
+# and local test datasets don't belong in git. Prefer creating real projects
+# outside this repo directory (e.g. ~/patchcore_projects/<name>) so this stays clean.
+test_project/
+dataset/
+*.ckpt
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

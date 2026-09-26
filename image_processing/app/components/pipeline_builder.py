@@ -1,0 +1,223 @@
+"""Renders the preprocessing tool chain: add/remove/reorder steps, per-step settings + preview.
+
+The tool chain list lives in the Streamlit sidebar (st.sidebar), not the main content
+area. It scrolls independently and stays visible regardless of chain length, so picking
+a step never requires scrolling down to its settings and back up to pick the next one.
+The main content area holds the settings panel and a 3-column before/after preview.
+
+The in-progress step chain is persisted to project.draft_pipeline_path on every change,
+not just kept in st.session_state — session_state is wiped on a browser refresh or a new
+tab, so without this the user would lose their chain and have to rebuild it from scratch.
+
+Reordering uses up/down buttons rather than a drag-and-drop component — simpler and more
+reliable than depending on a third-party Streamlit component, at the cost of being less
+slick. The step list, once configured, composes with `preprocessing.pipeline` exactly the
+same way regardless of how it was arranged.
+"""
+import uuid
+
+import streamlit as st
+
+from image_processing.core import repository as repo
+from image_processing.core.config_schema import PipelineStep, PreprocessConfig
+from image_processing.core.store import read_json, write_json
+from image_processing.preprocessing import align, pipeline
+from image_processing.preprocessing.registry import TOOL_LABELS, TOOLS, get_tool
+
+STEPS_KEY = "pp_steps"
+SELECTED_KEY = "pp_selected_index"
+SAMPLE_KEY = "pp_sample_image_id"
+
+
+def _load_draft(project) -> list[dict]:
+    return read_json(project.draft_pipeline_path, default={"steps": []})["steps"]
+
+
+def _save_draft(project, steps: list[dict]) -> None:
+    write_json(project.draft_pipeline_path, {"steps": steps})
+
+
+def _steps(project) -> list[dict]:
+    if STEPS_KEY not in st.session_state:
+        st.session_state[STEPS_KEY] = _load_draft(project)
+    return st.session_state[STEPS_KEY]
+
+
+def _known_risky_order_warning(steps: list[dict]) -> str | None:
+    types = [s["type"] for s in steps]
+    if "align" in types:
+        align_idx = types.index("align")
+        if "crop" in types[:align_idx]:
+            return "A crop step runs before align — it may crop away a needed landmark region."
+        if "resize" in types[:align_idx]:
+            return "A resize step runs before align — landmark coordinates were picked at a different scale."
+    return None
+
+
+def _sample_image(project) -> tuple[str | None, "np.ndarray | None"]:
+    images = repo.list_images(project)
+    if not images:
+        return None, None
+    ids = [img["id"] for img in images]
+    current = st.session_state.get(SAMPLE_KEY, ids[0])
+    if current not in ids:
+        current = ids[0]
+    chosen = st.selectbox("Preview sample image", ids, index=ids.index(current), key=SAMPLE_KEY)
+    image = pipeline.load_image(repo.image_path(project, chosen))
+    return chosen, image
+
+
+def _render_align_landmark_manager(project, step: dict, steps: list[dict], sample_image) -> None:
+    """Mutates step['params']['landmarks'] directly (step is a live entry in `steps`,
+    which is the same list object backing session_state) so removals/additions are never
+    lost to a discarded local copy when a button handler triggers an immediate rerun."""
+    st.markdown("**Manage landmarks**")
+    images = repo.list_images(project)
+    ids = [img["id"] for img in images]
+    ref_id = st.selectbox("Reference image", ids, key="align_ref_image")
+    ref_image = pipeline.load_image(repo.image_path(project, ref_id))
+    rh, rw = ref_image.shape[:2]
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.image(ref_image, caption="Reference image", width="stretch")
+    with col2:
+        x = st.slider("Landmark X", 0, max(1, rw - 8), min(rw // 4, rw - 8), key="lm_x")
+        y = st.slider("Landmark Y", 0, max(1, rh - 8), min(rh // 4, rh - 8), key="lm_y")
+        w = st.slider("Landmark Width", 8, max(8, rw - x), min(40, rw - x), key="lm_w")
+        h = st.slider("Landmark Height", 8, max(8, rh - y), min(40, rh - y), key="lm_h")
+        st.image(ref_image[y : y + h, x : x + w], caption="Landmark patch preview")
+        if st.button("Add landmark"):
+            landmark = align.make_landmark(ref_image, x, y, w, h)
+            step["params"]["landmarks"] = [*step["params"].get("landmarks", []), landmark]
+            _save_draft(project, steps)
+            st.success(f"Added landmark at ({x}, {y}), size {w}x{h}")
+
+    landmarks = step["params"].get("landmarks", [])
+    if landmarks:
+        st.write(f"{len(landmarks)} landmark(s) defined:")
+        for i, lm in enumerate(landmarks):
+            lc1, lc2 = st.columns([4, 1])
+            lc1.write(f"Landmark {i}: pos=({lm['x']}, {lm['y']}), size={lm['w']}x{lm['h']}")
+            if lc2.button("Remove", key=f"rm_lm_{i}"):
+                step["params"]["landmarks"] = [l for j, l in enumerate(landmarks) if j != i]
+                _save_draft(project, steps)
+                st.rerun()
+
+    if sample_image is not None and landmarks:
+        low_conf = align.low_confidence_landmarks(sample_image, step["params"])
+        if low_conf:
+            st.warning(f"Low-confidence match on landmark(s) {low_conf} for the current preview image.")
+
+
+def _render_sidebar_chain(project, steps: list[dict]) -> int:
+    """Renders the add/reorder/remove/select tool chain in the sidebar, which scrolls
+    independently of the main content — so a long chain never forces the user to scroll
+    down to settings after picking a step, then back up to pick the next one."""
+    st.sidebar.subheader("Tool chain")
+    new_type = st.sidebar.selectbox("Add a tool", list(TOOLS.keys()), format_func=lambda t: TOOL_LABELS[t])
+    if st.sidebar.button("+ Add Step", width="stretch"):
+        steps.append({"id": uuid.uuid4().hex[:8], "type": new_type, "params": get_tool(new_type).default_params()})
+        st.session_state[SELECTED_KEY] = len(steps) - 1
+        _save_draft(project, steps)
+        st.rerun()
+
+    if not steps:
+        st.sidebar.info("No steps yet — add a tool above.")
+        return 0
+
+    warning = _known_risky_order_warning(steps)
+    if warning:
+        st.sidebar.warning(warning)
+
+    st.sidebar.divider()
+    selected = st.session_state.get(SELECTED_KEY, 0)
+    selected = min(selected, len(steps) - 1)
+
+    for i, step in enumerate(steps):
+        up_col, down_col, del_col, label_col = st.sidebar.columns([1, 1, 1, 4])
+        # Icons are passed via `icon=` (Streamlit's bundled Material Symbols font) rather
+        # than as raw Unicode glyphs (↑ ↓ ✕) in the label — those depend on the button's
+        # text font having a matching glyph, which isn't guaranteed and rendered blank here.
+        with up_col:
+            if st.button(
+                "", icon=":material/keyboard_arrow_up:", key=f"up_{step['id']}", disabled=(i == 0), help="Move up"
+            ):
+                steps[i - 1], steps[i] = steps[i], steps[i - 1]
+                st.session_state[SELECTED_KEY] = i - 1
+                _save_draft(project, steps)
+                st.rerun()
+        with down_col:
+            if st.button(
+                "",
+                icon=":material/keyboard_arrow_down:",
+                key=f"down_{step['id']}",
+                disabled=(i == len(steps) - 1),
+                help="Move down",
+            ):
+                steps[i + 1], steps[i] = steps[i], steps[i + 1]
+                st.session_state[SELECTED_KEY] = i + 1
+                _save_draft(project, steps)
+                st.rerun()
+        with del_col:
+            if st.button("", icon=":material/close:", key=f"del_{step['id']}", help="Remove step"):
+                steps.pop(i)
+                st.session_state[SELECTED_KEY] = max(0, i - 1)
+                _save_draft(project, steps)
+                st.rerun()
+        with label_col:
+            label = f"{i + 1}. {TOOL_LABELS[step['type']]}"
+            if st.button(label, key=f"select_{step['id']}", type="primary" if i == selected else "secondary", width="stretch"):
+                selected = i
+                st.session_state[SELECTED_KEY] = i
+
+    return selected
+
+
+def render(project) -> dict | None:
+    """Renders the full pipeline builder UI. Returns the build_cache report after 'Apply', else None."""
+    steps = _steps(project)
+
+    selected = _render_sidebar_chain(project, steps)
+    if not steps:
+        st.info("No steps yet — add a tool in the sidebar to start building your preprocessing chain.")
+        return None
+
+    sample_id, sample_image = _sample_image(project)
+    if sample_image is None:
+        st.info("Import images to enable preview.")
+        return None
+
+    step = steps[selected]
+    tool = get_tool(step["type"])
+
+    st.subheader(f"Settings — {TOOL_LABELS[step['type']]} (step {selected + 1})")
+    settings_col, input_col, output_col = st.columns([1, 1, 1])
+
+    image_before = pipeline.apply_up_to(sample_image, [PipelineStep(**s) for s in steps], selected)
+
+    with settings_col:
+        new_params = tool.render_controls(step["params"], context={"sample_image": image_before})
+        if new_params != step["params"]:
+            step["params"] = new_params
+        if step["type"] == "align":
+            _render_align_landmark_manager(project, step, steps, image_before)
+
+    image_after = tool.apply(image_before, step["params"])
+    with input_col:
+        st.caption("Input to this step")
+        st.image(image_before, width="stretch")
+    with output_col:
+        st.caption("Output of this step")
+        st.image(image_after, width="stretch")
+
+    # Catches param-only changes (sliders, landmark additions) that don't go through an
+    # explicit st.rerun() above and so wouldn't otherwise hit a save point.
+    _save_draft(project, steps)
+
+    st.divider()
+    if st.button("Apply to project (build cache)", type="primary"):
+        config = PreprocessConfig(steps=[PipelineStep(**s) for s in steps])
+        report = pipeline.build_cache(project, config)
+        return report
+    return None
