@@ -61,14 +61,34 @@ def _image_size_for_hash(project: Project, preproc_hash: str) -> tuple[int, int]
     return (int(height), int(width))
 
 
+def _dataset_for_config(project: Project, preprocess_config: PreprocessConfig) -> tuple[list[str], list[str], list[str]]:
+    # Different preprocessing configs in the same sweep can carry different category
+    # scopes (a fork config and a spoon config), so the train/val image sets must be
+    # resolved per-config, not once globally — mirrors _image_size_for_hash above for the
+    # same underlying reason.
+    categories = preprocess_config.categories
+    train_ids = [
+        iid
+        for iid in repo.list_by_label_and_split(project, "good", "train")
+        if repo.image_matches_categories(project, iid, categories)
+    ]
+    val_good_ids = [
+        iid
+        for iid in repo.list_by_label_and_split(project, "good", "val")
+        if repo.image_matches_categories(project, iid, categories)
+    ]
+    val_anomaly_ids = [
+        iid
+        for iid in repo.list_by_label_and_split(project, "anomaly", "val")
+        if repo.image_matches_categories(project, iid, categories)
+    ]
+    return train_ids, val_good_ids, val_anomaly_ids
+
+
 def run_sweep(project: Project, sweep_id: str, grid: dict) -> dict:
     sweep_dir = project.sweeps_dir / sweep_id
     sweep_dir.mkdir(parents=True, exist_ok=True)
     write_json(sweep_dir / "grid.json", grid)
-
-    train_ids = repo.list_by_label_and_split(project, "good", "train")
-    val_good_ids = repo.list_by_label_and_split(project, "good", "val")
-    val_anomaly_ids = repo.list_by_label_and_split(project, "anomaly", "val")
 
     combos = list(
         itertools.product(
@@ -85,6 +105,7 @@ def run_sweep(project: Project, sweep_id: str, grid: dict) -> dict:
 
     image_size_cache: dict[str, tuple[int, int]] = {}
     preprocess_config_cache: dict[str, PreprocessConfig] = {}
+    dataset_cache: dict[str, tuple[list[str], list[str], list[str]]] = {}
 
     for i, (preproc_hash, backbone, layers, coreset_ratio, num_neighbors, patch_size) in enumerate(combos):
         run_id = project.new_id()
@@ -97,6 +118,9 @@ def run_sweep(project: Project, sweep_id: str, grid: dict) -> dict:
             preprocess_config_cache[preproc_hash] = PreprocessConfig.model_validate(
                 json.loads(config_path.read_text())
             )
+        if preproc_hash not in dataset_cache:
+            dataset_cache[preproc_hash] = _dataset_for_config(project, preprocess_config_cache[preproc_hash])
+        train_ids, val_good_ids, val_anomaly_ids = dataset_cache[preproc_hash]
 
         run_config = RunConfig(
             preproc_hash=preproc_hash,

@@ -14,6 +14,10 @@ class PipelineStep(BaseModel):
 
 class PreprocessConfig(BaseModel):
     steps: list[PipelineStep] = Field(default_factory=list)
+    # Which image categories this config applies to. Empty = applies to all images
+    # (backward compatible with every config built before this field existed — old config
+    # files on disk simply lack the key and load with this default).
+    categories: list[str] = Field(default_factory=list)
 
 
 class ModelConfig(BaseModel):

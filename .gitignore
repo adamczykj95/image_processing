@@ -15,6 +15,7 @@ venv/
 # outside this repo directory (e.g. ~/patchcore_projects/<name>) so this stays clean.
 test_project/
 dataset/
+MVTec_datasets/
 *.ckpt
 
 # OS / editor

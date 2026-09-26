@@ -14,6 +14,7 @@ reliable than depending on a third-party Streamlit component, at the cost of bei
 slick. The step list, once configured, composes with `preprocessing.pipeline` exactly the
 same way regardless of how it was arranged.
 """
+import json
 import uuid
 
 import streamlit as st
@@ -25,22 +26,36 @@ from image_processing.preprocessing import align, pipeline
 from image_processing.preprocessing.registry import TOOL_LABELS, TOOLS, get_tool
 
 STEPS_KEY = "pp_steps"
+CATEGORIES_KEY = "pp_categories"
 SELECTED_KEY = "pp_selected_index"
 SAMPLE_KEY = "pp_sample_image_id"
 
 
-def _load_draft(project) -> list[dict]:
-    return read_json(project.draft_pipeline_path, default={"steps": []})["steps"]
+def _load_draft(project) -> dict:
+    return read_json(project.draft_pipeline_path, default={"steps": [], "categories": []})
 
 
 def _save_draft(project, steps: list[dict]) -> None:
-    write_json(project.draft_pipeline_path, {"steps": steps})
+    # Reads categories from session_state rather than taking them as a parameter, so every
+    # existing _save_draft(project, steps) call site (add/remove/reorder step, landmark
+    # edits, param changes) keeps working unchanged — categories are only ever mutated by
+    # their own multiselect in render(), never by any of those other call sites.
+    categories = st.session_state.get(CATEGORIES_KEY, [])
+    write_json(project.draft_pipeline_path, {"steps": steps, "categories": categories})
 
 
 def _steps(project) -> list[dict]:
     if STEPS_KEY not in st.session_state:
-        st.session_state[STEPS_KEY] = _load_draft(project)
+        draft = _load_draft(project)
+        st.session_state[STEPS_KEY] = draft["steps"]
+        st.session_state[CATEGORIES_KEY] = draft.get("categories", [])
     return st.session_state[STEPS_KEY]
+
+
+def _categories(project) -> list[str]:
+    if CATEGORIES_KEY not in st.session_state:
+        _steps(project)  # loads both keys together from the same draft file
+    return st.session_state[CATEGORIES_KEY]
 
 
 def _known_risky_order_warning(steps: list[dict]) -> str | None:
@@ -54,8 +69,10 @@ def _known_risky_order_warning(steps: list[dict]) -> str | None:
     return None
 
 
-def _sample_image(project) -> tuple[str | None, "np.ndarray | None"]:
-    images = repo.list_images(project)
+def _sample_image(project, categories: list[str]) -> tuple[str | None, "np.ndarray | None"]:
+    images = [
+        img for img in repo.list_images(project) if repo.image_matches_categories(project, img["id"], categories)
+    ]
     if not images:
         return None, None
     ids = [img["id"] for img in images]
@@ -193,8 +210,10 @@ def _render_saved_config_list(project) -> None:
     for config_file in config_files:
         preproc_hash = config_file.stem
         nickname = names.get(preproc_hash, "")
+        config_categories = json.loads(config_file.read_text()).get("categories", [])
         with st.sidebar.expander(nickname or preproc_hash):
             st.caption(f"ID: `{preproc_hash}`")
+            st.caption(f"Categories: {', '.join(config_categories) if config_categories else '(all images)'}")
             new_name = st.text_input("Nickname", value=nickname, key=f"nickname_{preproc_hash}")
             if st.button("Save name", key=f"save_name_{preproc_hash}"):
                 repo.set_config_name(project, preproc_hash, new_name)
@@ -217,15 +236,38 @@ def render(project) -> dict | None:
     rerun, since the list would already have been drawn from the pre-build state of disk.
     """
     steps = _steps(project)
+    categories = _categories(project)
     selected = _render_sidebar_chain(project, steps)
+
+    all_categories = repo.list_categories(project)
+    new_categories = st.multiselect(
+        "Categories this config applies to",
+        all_categories,
+        default=[c for c in categories if c in all_categories],
+        key="pp_categories_widget",
+        help="Leave empty to apply this config to all images. Select one or more to scope "
+        "it (and, later, training) to only images tagged with those categories — e.g. a "
+        "separate preprocessing chain for each product type. Create categories on the "
+        "Label Images page.",
+    )
+    if new_categories != categories:
+        st.session_state[CATEGORIES_KEY] = new_categories
+        _save_draft(project, steps)
+        categories = new_categories
 
     report = None
     if not steps:
         st.info("No steps yet — add a tool in the sidebar to start building your preprocessing chain.")
     else:
-        sample_id, sample_image = _sample_image(project)
+        sample_id, sample_image = _sample_image(project, categories)
         if sample_image is None:
-            st.info("Import images to enable preview.")
+            if categories and repo.list_images(project):
+                st.info(
+                    "No images match the selected categories yet — assign categories on "
+                    "the Label Images page, or clear the selection above to preview all images."
+                )
+            else:
+                st.info("Import images to enable preview.")
         else:
             step = steps[selected]
             tool = get_tool(step["type"])
@@ -256,7 +298,7 @@ def render(project) -> dict | None:
 
             st.divider()
             if st.button("Apply to project (build cache)", type="primary"):
-                config = PreprocessConfig(steps=[PipelineStep(**s) for s in steps])
+                config = PreprocessConfig(steps=[PipelineStep(**s) for s in steps], categories=categories)
                 report = pipeline.build_cache(project, config)
 
     _render_saved_config_list(project)

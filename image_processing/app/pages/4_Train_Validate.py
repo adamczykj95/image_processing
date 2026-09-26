@@ -34,10 +34,31 @@ preproc_hash = st.selectbox(
     format_func=lambda h: config_names.get(h, h),
 )
 cache_dir = project.preprocessing_cache_dir / preproc_hash
+preprocess_config = PreprocessConfig.model_validate(
+    json.loads(config_files[hash_options.index(preproc_hash)].read_text())
+)
 
-train_ids = repo.list_by_label_and_split(project, "good", "train")
-val_good_ids = repo.list_by_label_and_split(project, "good", "val")
-val_anomaly_ids = repo.list_by_label_and_split(project, "anomaly", "val")
+# The preprocessing config carries its category scope, so selecting it also selects the
+# dataset — no separate category picker needed here. Empty categories = matches every image
+# (repository.image_matches_categories), preserving today's behavior for unscoped configs.
+train_ids = [
+    iid
+    for iid in repo.list_by_label_and_split(project, "good", "train")
+    if repo.image_matches_categories(project, iid, preprocess_config.categories)
+]
+val_good_ids = [
+    iid
+    for iid in repo.list_by_label_and_split(project, "good", "val")
+    if repo.image_matches_categories(project, iid, preprocess_config.categories)
+]
+val_anomaly_ids = [
+    iid
+    for iid in repo.list_by_label_and_split(project, "anomaly", "val")
+    if repo.image_matches_categories(project, iid, preprocess_config.categories)
+]
+
+if preprocess_config.categories:
+    st.caption(f"Scoped to categories: {', '.join(preprocess_config.categories)}")
 
 st.write(
     f"Train (good): **{len(train_ids)}** &nbsp;·&nbsp; "
@@ -110,9 +131,6 @@ if missing:
 
 if st.button("Start Training", type="primary", disabled=not can_train):
     run_id = project.new_id()
-    preprocess_config = PreprocessConfig.model_validate(
-        json.loads(config_files[hash_options.index(preproc_hash)].read_text())
-    )
     run_config = RunConfig(
         preproc_hash=preproc_hash,
         preprocess=preprocess_config,

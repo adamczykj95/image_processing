@@ -10,7 +10,14 @@ SplitValue = str  # "train" | "val" | "unassigned"
 
 
 def load_catalog(project: Project) -> dict:
-    return read_json(project.catalog_path, default={"images": [], "labels": {}})
+    # setdefault (not just the read_json default=) so a catalog.json written before the
+    # "categories" key existed still normalizes cleanly — the default= only covers a
+    # missing *file*, not a missing *key* within an existing one.
+    catalog = read_json(project.catalog_path, default={"images": [], "labels": {}, "categories": []})
+    catalog.setdefault("images", [])
+    catalog.setdefault("labels", {})
+    catalog.setdefault("categories", [])
+    return catalog
 
 
 def save_catalog(project: Project, catalog: dict) -> None:
@@ -29,7 +36,8 @@ def add_image(project: Project, image_id: str, relpath: str, width: int, height:
         }
     )
     catalog["labels"].setdefault(
-        image_id, {"label": "unlabeled", "split": "unassigned", "labeled_at": None, "notes": ""}
+        image_id,
+        {"label": "unlabeled", "split": "unassigned", "labeled_at": None, "notes": "", "categories": []},
     )
     save_catalog(project, catalog)
 
@@ -54,7 +62,8 @@ def set_label(
 ) -> None:
     catalog = load_catalog(project)
     entry = catalog["labels"].setdefault(
-        image_id, {"label": "unlabeled", "split": "unassigned", "labeled_at": None, "notes": ""}
+        image_id,
+        {"label": "unlabeled", "split": "unassigned", "labeled_at": None, "notes": "", "categories": []},
     )
     if label is not None:
         entry["label"] = label
@@ -67,9 +76,18 @@ def set_label(
 
 
 def get_label(project: Project, image_id: str) -> dict:
-    return load_catalog(project)["labels"].get(
-        image_id, {"label": "unlabeled", "split": "unassigned", "labeled_at": None, "notes": ""}
-    )
+    # Built field-by-field with individual .get(key, default) calls, not a single
+    # .get(image_id, {whole default dict}) — this is what lets a new field (like
+    # "categories", added after many catalogs already existed) default cleanly for every
+    # pre-existing image with no migration step, instead of only for brand-new entries.
+    entry = load_catalog(project)["labels"].get(image_id, {})
+    return {
+        "label": entry.get("label", "unlabeled"),
+        "split": entry.get("split", "unassigned"),
+        "labeled_at": entry.get("labeled_at"),
+        "notes": entry.get("notes", ""),
+        "categories": entry.get("categories", []),
+    }
 
 
 def list_by_label(project: Project, label: LabelValue) -> list[str]:
@@ -150,3 +168,70 @@ def delete_config_name(project: Project, preproc_hash: str) -> None:
     if preproc_hash in names:
         del names[preproc_hash]
         save_config_names(project, names)
+
+
+# -- image categories: orthogonal, multi-valued tags independent of label/split ------
+
+
+def list_categories(project: Project) -> list[str]:
+    return load_catalog(project)["categories"]
+
+
+def create_category(project: Project, name: str) -> None:
+    name = name.strip()
+    if not name:
+        return
+    catalog = load_catalog(project)
+    if name not in catalog["categories"]:
+        catalog["categories"].append(name)
+        save_catalog(project, catalog)
+
+
+def delete_category(project: Project, name: str) -> None:
+    catalog = load_catalog(project)
+    if name in catalog["categories"]:
+        catalog["categories"].remove(name)
+    for entry in catalog["labels"].values():
+        if name in entry.get("categories", []):
+            entry["categories"].remove(name)
+    save_catalog(project, catalog)
+
+
+def count_images_with_category(project: Project, name: str) -> int:
+    labels = load_catalog(project)["labels"]
+    return sum(1 for entry in labels.values() if name in entry.get("categories", []))
+
+
+def set_image_categories(project: Project, image_id: str, categories: list[str]) -> None:
+    """Replaces (not merges) the given image's category list."""
+    catalog = load_catalog(project)
+    entry = catalog["labels"].setdefault(
+        image_id,
+        {"label": "unlabeled", "split": "unassigned", "labeled_at": None, "notes": "", "categories": []},
+    )
+    entry["categories"] = list(categories)
+    save_catalog(project, catalog)
+
+
+def add_category_to_images(project: Project, category: str, image_ids: list[str]) -> None:
+    """Bulk-assign: adds `category` to every image in image_ids that doesn't already have it."""
+    catalog = load_catalog(project)
+    for image_id in image_ids:
+        entry = catalog["labels"].setdefault(
+            image_id,
+            {"label": "unlabeled", "split": "unassigned", "labeled_at": None, "notes": "", "categories": []},
+        )
+        cats = entry.setdefault("categories", [])
+        if category not in cats:
+            cats.append(category)
+    save_catalog(project, catalog)
+
+
+def image_matches_categories(project: Project, image_id: str, categories: list[str]) -> bool:
+    """True if `categories` is empty (no scope = matches everything) or the image has at
+    least one of the given categories (OR match, not AND — requiring all of a config's
+    categories wouldn't make sense for e.g. a shared fork+spoon config)."""
+    if not categories:
+        return True
+    image_categories = set(get_label(project, image_id).get("categories", []))
+    return bool(image_categories & set(categories))

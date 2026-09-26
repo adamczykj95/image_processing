@@ -17,12 +17,48 @@ if not images:
     st.info("No images yet — import some on the Import Images page first.")
     st.stop()
 
-# Bumped whenever a bulk operation (e.g. auto-assign) rewrites labels/splits out from
-# under the per-image widgets below. Baked into their `key`s so Streamlit treats them as
-# fresh widgets on the next render instead of reusing a stale cached value and — since the
-# gallery loop's change-detection can't tell "stale cache" from "user edited it" — silently
-# writing that stale value straight back over the bulk update in the same rerun.
+# Bumped whenever a bulk operation (auto-assign split, bulk category assign, or deleting a
+# category) rewrites data out from under the per-image widgets below. Baked into their
+# `key`s so Streamlit treats them as fresh widgets on the next render instead of reusing a
+# stale cached value and — since the gallery loop's change-detection can't tell "stale
+# cache" from "user edited it" — silently writing that stale value straight back over the
+# bulk update in the same rerun. Deleting a category additionally *requires* this: a
+# multiselect whose cached value references an option no longer in its options list raises
+# an error, not just a display glitch.
 generation = st.session_state.setdefault("label_gen", 0)
+
+st.subheader("Image categories")
+st.caption(
+    "Optional tags independent of good/anomaly — e.g. distinguish product types (forks "
+    "vs. spoons) so each can get its own preprocessing config and model."
+)
+all_categories = repo.list_categories(project)
+
+new_cat_col, add_cat_col = st.columns([3, 1])
+with new_cat_col:
+    new_category_name = st.text_input(
+        "New category name", key="new_category_name", label_visibility="collapsed", placeholder="e.g. fork"
+    )
+with add_cat_col:
+    if st.button("Add category", width="stretch"):
+        if new_category_name.strip():
+            repo.create_category(project, new_category_name)
+            st.rerun()
+
+if all_categories:
+    for category in all_categories:
+        count = repo.count_images_with_category(project, category)
+        cat_col, count_col, del_col = st.columns([3, 2, 1])
+        cat_col.write(f"**{category}**")
+        count_col.caption(f"{count} image(s)")
+        if del_col.button("Delete", key=f"delete_category_{category}"):
+            repo.delete_category(project, category)
+            st.session_state["label_gen"] += 1
+            st.rerun()
+else:
+    st.caption("No categories yet — add one above.")
+
+st.divider()
 
 st.subheader("Quick train/val split")
 st.caption(
@@ -59,6 +95,18 @@ for img in images:
     ):
         filtered.append((img, label_entry))
 
+if all_categories:
+    bulk_cat_col, bulk_btn_col = st.columns([3, 1])
+    with bulk_cat_col:
+        bulk_category = st.selectbox("Bulk-assign category to images shown below", all_categories)
+    with bulk_btn_col:
+        st.write("")
+        if st.button(f"Add to {len(filtered)} shown image(s)", width="stretch"):
+            repo.add_category_to_images(project, bulk_category, [img["id"] for img, _ in filtered])
+            st.session_state["label_gen"] += 1
+            st.success(f"Added '{bulk_category}' to {len(filtered)} image(s).")
+            st.rerun()
+
 st.write(f"{len(filtered)} image(s)")
 
 cols_per_row = 4
@@ -80,6 +128,15 @@ for row_start in range(0, len(filtered), cols_per_row):
                 index=["unassigned", "train", "val"].index(label_entry["split"]),
                 key=f"split_{img['id']}_{generation}",
             )
+            categories_selected = st.multiselect(
+                "Categories",
+                all_categories,
+                default=[c for c in label_entry["categories"] if c in all_categories],
+                key=f"categories_{img['id']}_{generation}",
+            )
             if label != label_entry["label"] or split != label_entry["split"]:
                 repo.set_label(project, img["id"], label=label, split=split)
+                st.rerun()
+            if categories_selected != label_entry["categories"]:
+                repo.set_image_categories(project, img["id"], categories_selected)
                 st.rerun()
