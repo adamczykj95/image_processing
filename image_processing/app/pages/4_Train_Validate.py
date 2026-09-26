@@ -10,6 +10,7 @@ from image_processing.app.style import inject_global_css
 from image_processing.core import repository as repo
 from image_processing.core.config_schema import ModelConfig, PreprocessConfig, RunConfig
 from image_processing.ml import metrics as ml_metrics
+from image_processing.ml.patchcore_ext import feature_grid_size
 from image_processing.ml.train import run_training
 from image_processing.preprocessing.pipeline import load_image, missing_cached_images
 
@@ -51,6 +52,39 @@ with c1:
 with c2:
     coreset_ratio = st.slider("Coreset sampling ratio", 0.01, 1.0, 0.1, step=0.01)
     num_neighbors = st.slider("Num neighbors", 1, 20, 9)
+    patch_size = st.slider(
+        "Patch size (local pooling)",
+        min_value=1,
+        max_value=31,
+        value=3,
+        step=2,
+        help="Smaller = more sensitive to small/fine defects, sharper heatmap "
+        "localization, more prone to false positives on textured normal surfaces. "
+        "Larger = more robust to that texture noise, but can dilute small defects "
+        "and blur localization. No hard upper limit, but see the live warning below "
+        "for when a value stops being meaningful at your current resolution/layers.",
+    )
+
+# Patch size pools over the *feature map* grid, not the raw image — its practical ceiling
+# depends on input resolution and which layer(s) are selected. Warn (don't block) once it
+# gets close to or exceeds the smallest selected layer's actual grid size, since an
+# oversized kernel doesn't error, it just quietly zero-pads its way to a meaningless,
+# near-uniform output (see ml/patchcore_ext.py).
+if layers:
+    grid_sizes = {layer: feature_grid_size(min(image_size), layer) for layer in layers}
+    tightest_layer, tightest_grid = min(grid_sizes.items(), key=lambda kv: kv[1])
+    if patch_size >= tightest_grid:
+        st.error(
+            f"Patch size {patch_size} is >= {tightest_layer}'s feature grid "
+            f"({tightest_grid}x{tightest_grid} at this resolution) — pooling will be "
+            "dominated by zero-padding and produce a meaningless, nearly-uniform result."
+        )
+    elif patch_size >= tightest_grid / 2:
+        st.warning(
+            f"Patch size {patch_size} is a large fraction of {tightest_layer}'s feature "
+            f"grid ({tightest_grid}x{tightest_grid} at this resolution) — detection "
+            "quality may start to degrade as it grows further."
+        )
 
 missing = missing_cached_images(
     project,
@@ -79,7 +113,11 @@ if st.button("Start Training", type="primary", disabled=not can_train):
         preproc_hash=preproc_hash,
         preprocess=preprocess_config,
         model=ModelConfig(
-            backbone=backbone, layers=layers, coreset_sampling_ratio=coreset_ratio, num_neighbors=num_neighbors
+            backbone=backbone,
+            layers=layers,
+            coreset_sampling_ratio=coreset_ratio,
+            num_neighbors=num_neighbors,
+            patch_size=patch_size,
         ),
         train_image_ids=train_ids,
         val_good_image_ids=val_good_ids,
@@ -123,11 +161,6 @@ if run["status"].get("state") == "done" and predictions_path.exists():
     st.dataframe(
         pd.DataFrame(cm, index=["Actual: good", "Actual: anomaly"], columns=["Pred: good", "Pred: anomaly"])
     )
-
-    roc = summary["roc_curve"]
-    if roc["fpr"]:
-        st.write("ROC curve")
-        st.line_chart(pd.DataFrame({"tpr": roc["tpr"]}, index=roc["fpr"]))
 
     st.divider()
     show_heatmap = st.toggle("Show anomaly heatmap overlay", value=True)

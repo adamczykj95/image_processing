@@ -8,13 +8,13 @@ from pathlib import Path
 import numpy as np
 import torch
 from anomalib.engine import Engine
-from anomalib.models import Patchcore
 
 from image_processing.core.config_schema import RunConfig
 from image_processing.core.project import Project
 from image_processing.core.store import write_json
 from image_processing.ml.datamodule import build_datamodule, materialize_run_data
 from image_processing.ml.metrics import compute_run_range
+from image_processing.ml.patchcore_ext import PatchSizePatchcore
 
 
 def _set_status(run_dir: Path, state: str, message: str = "") -> None:
@@ -39,14 +39,15 @@ def run_training(project: Project, run_id: str, run_config: RunConfig) -> dict:
         datamodule = build_datamodule(data_root)
 
         _set_status(run_dir, "running", "building model")
-        pre_processor = Patchcore.configure_pre_processor(
+        pre_processor = PatchSizePatchcore.configure_pre_processor(
             image_size=run_config.image_size, center_crop_size=None
         )
-        model = Patchcore(
+        model = PatchSizePatchcore(
             backbone=run_config.model.backbone,
             layers=run_config.model.layers,
             coreset_sampling_ratio=run_config.model.coreset_sampling_ratio,
             num_neighbors=run_config.model.num_neighbors,
+            patch_size=run_config.model.patch_size,
             pre_processor=pre_processor,
         )
 

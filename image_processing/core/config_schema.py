@@ -21,6 +21,7 @@ class ModelConfig(BaseModel):
     layers: list[str] = Field(default_factory=lambda: ["layer2", "layer3"])
     coreset_sampling_ratio: float = 0.1
     num_neighbors: int = 9
+    patch_size: int = 3  # local feature-pooling kernel; must be odd. See ml/patchcore_ext.py.
 
 
 class RunConfig(BaseModel):
@@ -39,3 +40,4 @@ class SweepGridConfig(BaseModel):
     layers: list[list[str]] = Field(default_factory=lambda: [["layer2", "layer3"]])
     coreset_sampling_ratio: list[float] = Field(default_factory=lambda: [0.1])
     num_neighbors: list[int] = Field(default_factory=lambda: [9])
+    patch_size: list[int] = Field(default_factory=lambda: [3])
