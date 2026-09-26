@@ -12,8 +12,17 @@ project = require_project()
 
 st.title("Import Images")
 
+# Bumped after a successful import so the file_uploader below gets a fresh `key` on the
+# next render — Streamlit otherwise keeps the previously-selected files in the widget
+# indefinitely (its state is tied to the key, not to whether they've been processed), so
+# the only way to make the upload tray clear itself is to make it a new widget instance.
+uploader_gen = st.session_state.setdefault("uploader_gen", 0)
+
 uploaded = st.file_uploader(
-    "Upload images", type=["png", "jpg", "jpeg", "bmp", "tif", "tiff"], accept_multiple_files=True
+    "Upload images",
+    type=["png", "jpg", "jpeg", "bmp", "tif", "tiff"],
+    accept_multiple_files=True,
+    key=f"uploader_{uploader_gen}",
 )
 
 if uploaded and st.button("Import selected files", type="primary"):
@@ -26,6 +35,7 @@ if uploaded and st.button("Import selected files", type="primary"):
         image.save(project.images_raw_dir / relpath)
         repo.add_image(project, image_id, relpath, image.width, image.height)
         imported += 1
+    st.session_state["uploader_gen"] += 1
     st.success(f"Imported {imported} image(s).")
     st.rerun()
 

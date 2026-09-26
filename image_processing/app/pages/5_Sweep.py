@@ -53,20 +53,48 @@ if status.get("total"):
 results_path = sweep_dir / "results.csv"
 if results_path.exists():
     df = pd.read_csv(results_path)
-    st.dataframe(df, width="stretch")
+    config_names = repo.load_config_names(project)
+    df.insert(0, "config", df["preproc_hash"].map(lambda h: config_names.get(h, h)))
 
-    st.write("View a specific run in detail:")
+    # st.dataframe can't embed interactive buttons in a cell, so the table is built row by
+    # row from st.columns instead — this is what lets "View" live inside the table itself
+    # rather than needing a separate list of buttons below it.
+    col_widths = [0.6, 1.3, 1.1, 1.3, 1.1, 0.9, 0.9, 0.7, 0.7, 0.7, 0.7, 0.6, 1.0]
+    headers = [
+        "",
+        "Config",
+        "Run ID",
+        "Backbone",
+        "Layers",
+        "Coreset",
+        "Neighbors",
+        "Patch",
+        "AUROC",
+        "F1",
+        "Recall",
+        "N",
+        "Status",
+    ]
+    header_cols = st.columns(col_widths)
+    for col, header in zip(header_cols, headers):
+        col.markdown(f"**{header}**")
+
     for _, row in df.iterrows():
-        view_col, label_col = st.columns([1, 6])
-        with view_col:
-            if st.button("View", key=f"view_{row['run_id']}"):
-                st.session_state["last_run_id"] = row["run_id"]
-                st.switch_page("pages/4_Train_Validate.py")
-        with label_col:
-            st.write(
-                f"`{row['run_id']}` · {row['backbone']} · {row['layers']} · "
-                f"coreset={row['coreset_sampling_ratio']} · neighbors={row['num_neighbors']} · "
-                f"patch={row['patch_size']} · AUROC={row['auroc']} · status={row['status']}"
-            )
+        cols = st.columns(col_widths)
+        if cols[0].button("View", key=f"view_{row['run_id']}"):
+            st.session_state["last_run_id"] = row["run_id"]
+            st.switch_page("pages/4_Train_Validate.py")
+        cols[1].write(row["config"])
+        cols[2].write(f"`{row['run_id']}`")
+        cols[3].write(row["backbone"])
+        cols[4].write(row["layers"])
+        cols[5].write(row["coreset_sampling_ratio"])
+        cols[6].write(row["num_neighbors"])
+        cols[7].write(row["patch_size"])
+        cols[8].write(row["auroc"])
+        cols[9].write(row["f1_anomaly"])
+        cols[10].write(row["recall_anomaly"])
+        cols[11].write(row["n_predictions"])
+        cols[12].write(row["status"])
 else:
     st.info("No results yet for this sweep.")

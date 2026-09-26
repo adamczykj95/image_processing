@@ -75,12 +75,11 @@ def set_label(
     save_catalog(project, catalog)
 
 
-def get_label(project: Project, image_id: str) -> dict:
+def _normalize_label_entry(entry: dict) -> dict:
     # Built field-by-field with individual .get(key, default) calls, not a single
     # .get(image_id, {whole default dict}) — this is what lets a new field (like
     # "categories", added after many catalogs already existed) default cleanly for every
     # pre-existing image with no migration step, instead of only for brand-new entries.
-    entry = load_catalog(project)["labels"].get(image_id, {})
     return {
         "label": entry.get("label", "unlabeled"),
         "split": entry.get("split", "unassigned"),
@@ -88,6 +87,47 @@ def get_label(project: Project, image_id: str) -> dict:
         "notes": entry.get("notes", ""),
         "categories": entry.get("categories", []),
     }
+
+
+def get_label(project: Project, image_id: str) -> dict:
+    entry = load_catalog(project)["labels"].get(image_id, {})
+    return _normalize_label_entry(entry)
+
+
+def get_all_labels(project: Project) -> dict[str, dict]:
+    """Normalized label entries for every image, from a single catalog read — use this
+    instead of calling get_label() once per image in a loop, which reloads and re-parses
+    the whole catalog.json file on every single call and scales badly as a project grows."""
+    labels = load_catalog(project)["labels"]
+    return {image_id: _normalize_label_entry(entry) for image_id, entry in labels.items()}
+
+
+def apply_label_updates(project: Project, updates: dict[str, dict]) -> None:
+    """Applies label/split/categories changes for multiple images in one read-modify-write,
+    instead of one separate catalog read-modify-write per image. `updates` is
+    {image_id: {"label": ..., "split": ..., "categories": [...]}} — any field left out of
+    an image's dict is untouched. Used by the Label Images gallery to save an entire batch
+    of pending widget changes atomically in a single write, rather than one write per
+    changed image with a script-restart in between each — the latter meant only the first
+    change found in a pass ever got persisted before the script stopped to rerun, so a
+    burst of rapid edits needed several uninterrupted reruns in a row to fully catch up,
+    and a new incoming interaction could reset that catch-up before it finished, silently
+    dropping whichever edits hadn't been reached yet.
+    """
+    catalog = load_catalog(project)
+    for image_id, fields in updates.items():
+        entry = catalog["labels"].setdefault(
+            image_id,
+            {"label": "unlabeled", "split": "unassigned", "labeled_at": None, "notes": "", "categories": []},
+        )
+        if "label" in fields:
+            entry["label"] = fields["label"]
+            entry["labeled_at"] = datetime.now(timezone.utc).isoformat()
+        if "split" in fields:
+            entry["split"] = fields["split"]
+        if "categories" in fields:
+            entry["categories"] = list(fields["categories"])
+    save_catalog(project, catalog)
 
 
 def list_by_label(project: Project, label: LabelValue) -> list[str]:

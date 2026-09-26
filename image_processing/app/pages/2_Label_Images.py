@@ -87,9 +87,16 @@ filter_choice = st.radio(
     "Show", ["All", "Unlabeled", "Good", "Anomaly"], horizontal=True
 )
 
+# One catalog read for the whole page, not one per image (get_label() reloads the whole
+# file from disk on every call — fine for a single lookup, expensive called in a loop
+# over every image shown here, and the main reason each rerun visibly took a while).
+all_labels = repo.get_all_labels(project)
+
+_DEFAULT_LABEL_ENTRY = {"label": "unlabeled", "split": "unassigned", "labeled_at": None, "notes": "", "categories": []}
+
 filtered = []
 for img in images:
-    label_entry = repo.get_label(project, img["id"])
+    label_entry = all_labels.get(img["id"], _DEFAULT_LABEL_ENTRY)
     if filter_choice == "All" or filter_choice.lower() == label_entry["label"] or (
         filter_choice == "Unlabeled" and label_entry["label"] == "unlabeled"
     ):
@@ -108,6 +115,15 @@ if all_categories:
             st.rerun()
 
 st.write(f"{len(filtered)} image(s)")
+
+# Collected across the *entire* gallery in this one pass, then written as a single batch
+# after the loop — not saved (and rerun) the moment the first changed widget is found.
+# That earlier pattern meant only one image's edit was ever persisted per script run, so a
+# batch of edits needed several uninterrupted reruns in a row to fully catch up, and a new
+# click arriving before that catch-up finished would reset it, silently dropping whichever
+# edits it hadn't reached yet. Doing it this way, any single rerun that completes — even if
+# several before it were cancelled by rapid clicking — saves every pending edit at once.
+pending_updates: dict[str, dict] = {}
 
 cols_per_row = 4
 for row_start in range(0, len(filtered), cols_per_row):
@@ -134,9 +150,15 @@ for row_start in range(0, len(filtered), cols_per_row):
                 default=[c for c in label_entry["categories"] if c in all_categories],
                 key=f"categories_{img['id']}_{generation}",
             )
+            image_updates: dict = {}
             if label != label_entry["label"] or split != label_entry["split"]:
-                repo.set_label(project, img["id"], label=label, split=split)
-                st.rerun()
+                image_updates["label"] = label
+                image_updates["split"] = split
             if categories_selected != label_entry["categories"]:
-                repo.set_image_categories(project, img["id"], categories_selected)
-                st.rerun()
+                image_updates["categories"] = categories_selected
+            if image_updates:
+                pending_updates[img["id"]] = image_updates
+
+if pending_updates:
+    repo.apply_label_updates(project, pending_updates)
+    st.rerun()
