@@ -38,6 +38,13 @@ class Project:
         return self.root / "preprocessing" / "cache"
 
     @property
+    def preprocessing_config_names_path(self) -> Path:
+        """User-assigned nicknames for preprocessing configs: {preproc_hash: nickname}.
+        Kept separate from the config json files themselves so those stay pure
+        PreprocessConfig dumps, loadable exactly as before everywhere they're read."""
+        return self.root / "preprocessing" / "config_names.json"
+
+    @property
     def draft_pipeline_path(self) -> Path:
         """The in-progress (not-yet-applied) preprocessing tool chain, persisted so it
         survives a browser refresh instead of living only in Streamlit session_state."""

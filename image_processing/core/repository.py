@@ -119,3 +119,34 @@ def list_sweeps(project: Project) -> list[dict]:
         status = read_json(sweep_dir / "status.json", default={"state": "unknown"})
         sweeps.append({"id": sweep_dir.name, "grid": grid, "status": status})
     return sweeps
+
+
+# -- preprocessing config nicknames --------------------------------------------------
+
+
+def load_config_names(project: Project) -> dict[str, str]:
+    return read_json(project.preprocessing_config_names_path, default={})
+
+
+def save_config_names(project: Project, names: dict[str, str]) -> None:
+    write_json(project.preprocessing_config_names_path, names)
+
+
+def get_config_name(project: Project, preproc_hash: str) -> str | None:
+    return load_config_names(project).get(preproc_hash)
+
+
+def set_config_name(project: Project, preproc_hash: str, name: str) -> None:
+    names = load_config_names(project)
+    if name.strip():
+        names[preproc_hash] = name.strip()
+    else:
+        names.pop(preproc_hash, None)
+    save_config_names(project, names)
+
+
+def delete_config_name(project: Project, preproc_hash: str) -> None:
+    names = load_config_names(project)
+    if preproc_hash in names:
+        del names[preproc_hash]
+        save_config_names(project, names)

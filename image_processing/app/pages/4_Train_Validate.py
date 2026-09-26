@@ -25,9 +25,13 @@ if not config_files:
     st.stop()
 
 hash_options = [f.stem for f in config_files]
+config_names = repo.load_config_names(project)
 default_hash = st.session_state.get("last_preproc_hash", hash_options[-1])
 preproc_hash = st.selectbox(
-    "Preprocessing config", hash_options, index=hash_options.index(default_hash) if default_hash in hash_options else 0
+    "Preprocessing config",
+    hash_options,
+    index=hash_options.index(default_hash) if default_hash in hash_options else 0,
+    format_func=lambda h: config_names.get(h, h),
 )
 cache_dir = project.preprocessing_cache_dir / preproc_hash
 

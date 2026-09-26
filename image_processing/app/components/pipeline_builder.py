@@ -174,50 +174,90 @@ def _render_sidebar_chain(project, steps: list[dict]) -> int:
     return selected
 
 
-def render(project) -> dict | None:
-    """Renders the full pipeline builder UI. Returns the build_cache report after 'Apply', else None."""
-    steps = _steps(project)
+def _render_saved_config_list(project) -> None:
+    """Lists every applied preprocessing config in the sidebar, below the tool chain, so
+    users can give each one a memorable nickname (the on-disk id stays the content hash —
+    the nickname is a separate display-only label, see repository.set_config_name) or
+    delete configs they no longer need."""
+    st.sidebar.divider()
+    st.sidebar.subheader("Saved preprocessing configs")
 
+    config_files = sorted(project.preprocessing_configs_dir.glob("*.json"))
+    if not config_files:
+        st.sidebar.caption("None yet — build a chain above and click 'Apply to project'.")
+        return
+
+    names = repo.load_config_names(project)
+    runs = repo.list_runs(project)
+
+    for config_file in config_files:
+        preproc_hash = config_file.stem
+        nickname = names.get(preproc_hash, "")
+        with st.sidebar.expander(nickname or preproc_hash):
+            st.caption(f"ID: `{preproc_hash}`")
+            new_name = st.text_input("Nickname", value=nickname, key=f"nickname_{preproc_hash}")
+            if st.button("Save name", key=f"save_name_{preproc_hash}"):
+                repo.set_config_name(project, preproc_hash, new_name)
+                st.rerun()
+
+            used_by = sum(1 for r in runs if r["config"].get("preproc_hash") == preproc_hash)
+            if used_by:
+                st.caption(f"⚠️ Used by {used_by} existing run(s) — deleting will break viewing them.")
+            if st.button("Delete config", key=f"delete_config_{preproc_hash}"):
+                pipeline.delete_config(project, preproc_hash)
+                st.rerun()
+
+
+def render(project) -> dict | None:
+    """Renders the full pipeline builder UI. Returns the build_cache report after 'Apply', else None.
+
+    The saved-config sidebar list is rendered *last*, after 'Apply to project' has had a
+    chance to run build_cache() earlier in this same pass — rendering it first (as
+    originally written) meant a newly-applied config wouldn't show up until the next
+    rerun, since the list would already have been drawn from the pre-build state of disk.
+    """
+    steps = _steps(project)
     selected = _render_sidebar_chain(project, steps)
+
+    report = None
     if not steps:
         st.info("No steps yet — add a tool in the sidebar to start building your preprocessing chain.")
-        return None
+    else:
+        sample_id, sample_image = _sample_image(project)
+        if sample_image is None:
+            st.info("Import images to enable preview.")
+        else:
+            step = steps[selected]
+            tool = get_tool(step["type"])
 
-    sample_id, sample_image = _sample_image(project)
-    if sample_image is None:
-        st.info("Import images to enable preview.")
-        return None
+            st.subheader(f"Settings — {TOOL_LABELS[step['type']]} (step {selected + 1})")
+            settings_col, input_col, output_col = st.columns([1, 1, 1])
 
-    step = steps[selected]
-    tool = get_tool(step["type"])
+            image_before = pipeline.apply_up_to(sample_image, [PipelineStep(**s) for s in steps], selected)
 
-    st.subheader(f"Settings — {TOOL_LABELS[step['type']]} (step {selected + 1})")
-    settings_col, input_col, output_col = st.columns([1, 1, 1])
+            with settings_col:
+                new_params = tool.render_controls(step["params"], context={"sample_image": image_before})
+                if new_params != step["params"]:
+                    step["params"] = new_params
+                if step["type"] == "align":
+                    _render_align_landmark_manager(project, step, steps, image_before)
 
-    image_before = pipeline.apply_up_to(sample_image, [PipelineStep(**s) for s in steps], selected)
+            image_after = tool.apply(image_before, step["params"])
+            with input_col:
+                st.caption("Input to this step")
+                st.image(image_before, width="stretch")
+            with output_col:
+                st.caption("Output of this step")
+                st.image(image_after, width="stretch")
 
-    with settings_col:
-        new_params = tool.render_controls(step["params"], context={"sample_image": image_before})
-        if new_params != step["params"]:
-            step["params"] = new_params
-        if step["type"] == "align":
-            _render_align_landmark_manager(project, step, steps, image_before)
+            # Catches param-only changes (sliders, landmark additions) that don't go
+            # through an explicit st.rerun() above and so wouldn't otherwise hit a save point.
+            _save_draft(project, steps)
 
-    image_after = tool.apply(image_before, step["params"])
-    with input_col:
-        st.caption("Input to this step")
-        st.image(image_before, width="stretch")
-    with output_col:
-        st.caption("Output of this step")
-        st.image(image_after, width="stretch")
+            st.divider()
+            if st.button("Apply to project (build cache)", type="primary"):
+                config = PreprocessConfig(steps=[PipelineStep(**s) for s in steps])
+                report = pipeline.build_cache(project, config)
 
-    # Catches param-only changes (sliders, landmark additions) that don't go through an
-    # explicit st.rerun() above and so wouldn't otherwise hit a save point.
-    _save_draft(project, steps)
-
-    st.divider()
-    if st.button("Apply to project (build cache)", type="primary"):
-        config = PreprocessConfig(steps=[PipelineStep(**s) for s in steps])
-        report = pipeline.build_cache(project, config)
-        return report
-    return None
+    _render_saved_config_list(project)
+    return report

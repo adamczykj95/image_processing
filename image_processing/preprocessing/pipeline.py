@@ -1,4 +1,5 @@
 """Runs an ordered list of preprocessing steps over images, and builds the on-disk cache."""
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -134,3 +135,16 @@ def build_cache(
         "warnings": warnings,
         "output_sizes": sorted(output_sizes),
     }
+
+
+def delete_config(project: Project, preproc_hash: str) -> None:
+    """Removes a preprocessing config's definition, its cached processed images, and its
+    nickname. Does not check whether existing runs reference this hash — the caller (the
+    sidebar UI) is responsible for warning the user about that before calling this."""
+    config_path = project.preprocessing_configs_dir / f"{preproc_hash}.json"
+    if config_path.exists():
+        config_path.unlink()
+    cache_dir = project.preprocessing_cache_dir / preproc_hash
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
+    repo.delete_config_name(project, preproc_hash)
