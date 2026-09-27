@@ -17,14 +17,35 @@ if not images:
     st.info("No images yet — import some on the Import Images page first.")
     st.stop()
 
-# Bumped whenever a bulk operation (auto-assign split, bulk category assign, or deleting a
-# category) rewrites data out from under the per-image widgets below. Baked into their
-# `key`s so Streamlit treats them as fresh widgets on the next render instead of reusing a
-# stale cached value and — since the gallery loop's change-detection can't tell "stale
-# cache" from "user edited it" — silently writing that stale value straight back over the
-# bulk update in the same rerun. Deleting a category additionally *requires* this: a
+
+def _selection_key(image_id: str) -> str:
+    return f"select_{image_id}"
+
+
+def _is_selected(image_id: str) -> bool:
+    return st.session_state.get(_selection_key(image_id), False)
+
+
+def _clear_selection() -> None:
+    # Direct session_state writes (no value= passed to the checkbox itself) rather than
+    # relying on a value/key combination — same pattern as the linked slider/number-input
+    # widgets elsewhere in this app, and for the same reason: a widget that takes both a
+    # `value=` derived from external state AND a fixed `key=` fights its own cached state
+    # instead of being reliably programmatically controlled between reruns.
+    for img in images:
+        st.session_state[_selection_key(img["id"])] = False
+
+
+# Bumped whenever a bulk operation (auto-assign split, bulk label/split/category assign, or
+# deleting a category) rewrites data out from under the per-image widgets below. Baked into
+# their `key`s so Streamlit treats them as fresh widgets on the next render instead of
+# reusing a stale cached value and — since the gallery loop's change-detection can't tell
+# "stale cache" from "user edited it" — silently writing that stale value straight back over
+# the bulk update in the same rerun. Deleting a category additionally *requires* this: a
 # multiselect whose cached value references an option no longer in its options list raises
-# an error, not just a display glitch.
+# an error, not just a display glitch. Selection checkboxes don't need this — they're pure
+# UI state independent of label/split/category data, and are cleared via direct
+# session_state writes (_clear_selection) rather than key-rotation.
 generation = st.session_state.setdefault("label_gen", 0)
 
 st.subheader("Image categories")
@@ -102,19 +123,84 @@ for img in images:
     ):
         filtered.append((img, label_entry))
 
+st.write(f"{len(filtered)} image(s)")
+
+st.subheader("Bulk actions")
+st.caption(
+    "Check the images you want below (or use the buttons here to select in bulk), then "
+    "apply a label, split, or category to all of them at once. Much faster than clicking "
+    "through every image individually once you're past a handful of them."
+)
+
+selected_ids = [img["id"] for img in images if _is_selected(img["id"])]
+
+select_all_col, select_none_col, count_col = st.columns([1, 1, 2])
+with select_all_col:
+    if st.button("Select all shown", width="stretch"):
+        for img, _ in filtered:
+            st.session_state[_selection_key(img["id"])] = True
+        st.rerun()
+with select_none_col:
+    if st.button("Select none", width="stretch"):
+        _clear_selection()
+        st.rerun()
+with count_col:
+    st.write(f"**{len(selected_ids)}** image(s) currently selected")
+
+# These rows are always rendered (never conditionally inserted/removed based on
+# selected_ids) — only their `disabled` state changes. Streamlit reflows the whole layout
+# below whenever elements are inserted or removed mid-page, which caused a visible flash
+# (briefly oversized images under the "running" overlay) the instant selection went from
+# empty to non-empty, and again after a bulk-apply cleared it back to empty. Keeping the
+# element structure constant across reruns avoids that reflow entirely.
+bulk_label_col, bulk_label_btn_col = st.columns([3, 1])
+with bulk_label_col:
+    bulk_label = st.selectbox(
+        "Set label for selected", ["unlabeled", "good", "anomaly"], key="bulk_label_choice"
+    )
+with bulk_label_btn_col:
+    st.write("")
+    if st.button(
+        f"Apply to {len(selected_ids)}", key="bulk_apply_label", width="stretch", disabled=not selected_ids
+    ):
+        repo.apply_label_updates(project, {iid: {"label": bulk_label} for iid in selected_ids})
+        _clear_selection()
+        st.session_state["label_gen"] += 1
+        st.success(f"Set label to '{bulk_label}' for {len(selected_ids)} image(s).")
+        st.rerun()
+
+bulk_split_col, bulk_split_btn_col = st.columns([3, 1])
+with bulk_split_col:
+    bulk_split = st.selectbox(
+        "Set split for selected", ["unassigned", "train", "val"], key="bulk_split_choice"
+    )
+with bulk_split_btn_col:
+    st.write("")
+    if st.button(
+        f"Apply to {len(selected_ids)}", key="bulk_apply_split", width="stretch", disabled=not selected_ids
+    ):
+        repo.apply_label_updates(project, {iid: {"split": bulk_split} for iid in selected_ids})
+        _clear_selection()
+        st.session_state["label_gen"] += 1
+        st.success(f"Set split to '{bulk_split}' for {len(selected_ids)} image(s).")
+        st.rerun()
+
 if all_categories:
-    bulk_cat_col, bulk_btn_col = st.columns([3, 1])
+    bulk_cat_col, bulk_cat_btn_col = st.columns([3, 1])
     with bulk_cat_col:
-        bulk_category = st.selectbox("Bulk-assign category to images shown below", all_categories)
-    with bulk_btn_col:
+        bulk_category = st.selectbox("Add category to selected", all_categories, key="bulk_cat_choice")
+    with bulk_cat_btn_col:
         st.write("")
-        if st.button(f"Add to {len(filtered)} shown image(s)", width="stretch"):
-            repo.add_category_to_images(project, bulk_category, [img["id"] for img, _ in filtered])
+        if st.button(
+            f"Add to {len(selected_ids)}", key="bulk_apply_category", width="stretch", disabled=not selected_ids
+        ):
+            repo.add_category_to_images(project, bulk_category, selected_ids)
+            _clear_selection()
             st.session_state["label_gen"] += 1
-            st.success(f"Added '{bulk_category}' to {len(filtered)} image(s).")
+            st.success(f"Added '{bulk_category}' to {len(selected_ids)} image(s).")
             st.rerun()
 
-st.write(f"{len(filtered)} image(s)")
+st.divider()
 
 # Collected across the *entire* gallery in this one pass, then written as a single batch
 # after the loop — not saved (and rerun) the moment the first changed widget is found.
@@ -131,6 +217,7 @@ for row_start in range(0, len(filtered), cols_per_row):
     for col, (img, label_entry) in zip(cols, filtered[row_start : row_start + cols_per_row]):
         with col:
             st.image(str(project.images_raw_dir / img["relpath"]), width="stretch")
+            st.checkbox("Select", key=_selection_key(img["id"]))
             label = st.radio(
                 "Label",
                 ["unlabeled", "good", "anomaly"],

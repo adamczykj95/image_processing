@@ -21,6 +21,7 @@ import streamlit as st
 
 from image_processing.core import repository as repo
 from image_processing.core.config_schema import PipelineStep, PreprocessConfig
+from image_processing.core.hashing import stable_hash
 from image_processing.core.store import read_json, write_json
 from image_processing.preprocessing import align, pipeline
 from image_processing.preprocessing.registry import TOOL_LABELS, TOOLS, get_tool
@@ -323,9 +324,35 @@ def render(project) -> dict | None:
             _save_draft(project, steps)
 
             st.divider()
-            if st.button("Apply to project (build cache)", type="primary"):
+            # The nickname is scoped to this exact config's would-be hash (not a fixed
+            # key), so the box shows that config's existing nickname (if it was already
+            # applied before) rather than leftover text typed for a different chain — and
+            # so an unrelated previous config's name is never blanked out by accident.
+            # This is the same tool chain/hash regardless of which step type is currently
+            # selected, so one nickname box covers every tool, not a per-tool control.
+            pending_hash = stable_hash(
+                PreprocessConfig(steps=[PipelineStep(**s) for s in steps], categories=categories).model_dump()
+            )
+            existing_nickname = repo.get_config_name(project, pending_hash) or ""
+            nickname_key = f"pending_nickname_{pending_hash}"
+            # The button is rendered above the nickname box (per user request), so its
+            # on-click branch runs before the text_input() line below it in this same
+            # script pass. That's fine — the key's value already lives in session_state
+            # from the box's last render, same as any other keyed widget read back after
+            # the fact — but it does mean we must read st.session_state[nickname_key]
+            # directly here rather than a local variable the text_input call would return.
+            if st.button("Apply to project", type="primary", width="stretch"):
                 config = PreprocessConfig(steps=[PipelineStep(**s) for s in steps], categories=categories)
                 report = pipeline.build_cache(project, config)
+                repo.set_config_name(project, report["preproc_hash"], st.session_state.get(nickname_key, ""))
+            st.text_input(
+                "Nickname",
+                value=existing_nickname,
+                key=nickname_key,
+                placeholder="e.g. fork-v1",
+                help="Optional memorable name, assigned when you click Apply. Editable "
+                "later from 'Saved preprocessing configs' in the sidebar.",
+            )
 
     _render_saved_config_list(project)
     return report
