@@ -20,5 +20,12 @@ def apply(image: np.ndarray, params: dict) -> np.ndarray:
 def render_controls(params: dict, context: dict | None = None) -> dict:
     import streamlit as st
 
-    mode = st.radio("Color mode", ["rgb", "gray"], index=0 if params.get("mode", "rgb") == "rgb" else 1)
+    step_id = (context or {}).get("step_id", "")
+    # Explicit, step-scoped key — see crop.py's render_controls for why this is needed.
+    mode = st.radio(
+        "Color mode",
+        ["rgb", "gray"],
+        index=0 if params.get("mode", "rgb") == "rgb" else 1,
+        key=f"color_mode_{step_id}",
+    )
     return {"mode": mode}

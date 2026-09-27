@@ -91,14 +91,26 @@ def low_confidence_landmarks(image: np.ndarray, params: dict) -> list[int]:
 def render_controls(params: dict, context: dict | None = None) -> dict:
     import streamlit as st
 
+    from image_processing.preprocessing.ui_widgets import slider_with_input
+
+    step_id = (context or {}).get("step_id", "")
     st.caption(
         "Pick a reference image and draw one or more landmark boxes on it via "
         "'Manage landmarks' below. One landmark corrects translation only; "
         "two or more also correct rotation."
     )
-    threshold = st.slider(
-        "Match confidence threshold", 0.0, 1.0, float(params.get("confidence_threshold", 0.5)), step=0.05
+    # Step-scoped key prefixes — see crop.py's render_controls for why these are needed.
+    threshold = slider_with_input(
+        "Match confidence threshold",
+        0.0,
+        1.0,
+        float(params.get("confidence_threshold", 0.5)),
+        0.05,
+        f"align_threshold_{step_id}",
+        format="%.2f",
     )
-    margin = st.slider("Search margin (px)", 5, 200, int(params.get("search_margin", 40)))
+    margin = slider_with_input(
+        "Search margin (px)", 5, 200, int(params.get("search_margin", 40)), 1, f"align_margin_{step_id}"
+    )
     st.write(f"Landmarks defined: {len(params.get('landmarks', []))}")
     return {**params, "confidence_threshold": threshold, "search_margin": margin}

@@ -24,6 +24,7 @@ from image_processing.core.config_schema import PipelineStep, PreprocessConfig
 from image_processing.core.store import read_json, write_json
 from image_processing.preprocessing import align, pipeline
 from image_processing.preprocessing.registry import TOOL_LABELS, TOOLS, get_tool
+from image_processing.preprocessing.ui_widgets import slider_with_input
 
 STEPS_KEY = "pp_steps"
 CATEGORIES_KEY = "pp_categories"
@@ -99,10 +100,26 @@ def _render_align_landmark_manager(project, step: dict, steps: list[dict], sampl
     with col1:
         st.image(ref_image, caption="Reference image", width="stretch")
     with col2:
-        x = st.slider("Landmark X", 0, max(1, rw - 8), min(rw // 4, rw - 8), key="lm_x")
-        y = st.slider("Landmark Y", 0, max(1, rh - 8), min(rh // 4, rh - 8), key="lm_y")
-        w = st.slider("Landmark Width", 8, max(8, rw - x), min(40, rw - x), key="lm_w")
-        h = st.slider("Landmark Height", 8, max(8, rh - y), min(40, rh - y), key="lm_h")
+        # step["id"]-scoped prefixes so two separate align steps don't share landmark-picker
+        # state, and slider_with_input for a linked text-entry box on each — see
+        # preprocessing/crop.py's render_controls for why the key needs to be stable.
+        #
+        # Width/height are sized FIRST, against the full image dimensions — independent of
+        # X/Y. Only after the size is set do X/Y get constrained (max = image size minus
+        # the chosen width/height) so the box can't be dragged off-image. The previous
+        # order did this backwards (width's max was `image width - x`), so moving X shrank
+        # the max allowed width and Streamlit silently clamped an already-chosen width down
+        # to fit — the box's *size* would change just from repositioning it. This way the
+        # dependency only ever runs one direction: resizing can nudge position back
+        # on-image if needed, but repositioning never touches size.
+        w = slider_with_input("Landmark Width", 8, max(8, rw), max(8, min(40, rw)), 1, f"lm_w_{step['id']}")
+        h = slider_with_input("Landmark Height", 8, max(8, rh), max(8, min(40, rh)), 1, f"lm_h_{step['id']}")
+        x = slider_with_input(
+            "Landmark X", 0, max(0, rw - w), min(rw // 4, max(0, rw - w)), 1, f"lm_x_{step['id']}"
+        )
+        y = slider_with_input(
+            "Landmark Y", 0, max(0, rh - h), min(rh // 4, max(0, rh - h)), 1, f"lm_y_{step['id']}"
+        )
         st.image(ref_image[y : y + h, x : x + w], caption="Landmark patch preview")
         if st.button("Add landmark"):
             landmark = align.make_landmark(ref_image, x, y, w, h)
@@ -185,8 +202,15 @@ def _render_sidebar_chain(project, steps: list[dict]) -> int:
         with label_col:
             label = f"{i + 1}. {TOOL_LABELS[step['type']]}"
             if st.button(label, key=f"select_{step['id']}", type="primary" if i == selected else "secondary", width="stretch"):
-                selected = i
+                # Unlike the up/down/delete buttons above, this one used to update
+                # `selected` without an st.rerun() — but this button's own `type=`
+                # (primary/secondary) is computed and sent to the browser *before* Streamlit
+                # even knows it was clicked, so the just-clicked step stayed unhighlighted
+                # and the previously-selected one stayed highlighted until a second click
+                # forced a fresh pass. Rerunning immediately, like its sibling buttons do,
+                # makes the highlight correct on the very next render.
                 st.session_state[SELECTED_KEY] = i
+                st.rerun()
 
     return selected
 
@@ -278,7 +302,9 @@ def render(project) -> dict | None:
             image_before = pipeline.apply_up_to(sample_image, [PipelineStep(**s) for s in steps], selected)
 
             with settings_col:
-                new_params = tool.render_controls(step["params"], context={"sample_image": image_before})
+                new_params = tool.render_controls(
+                    step["params"], context={"sample_image": image_before, "step_id": step["id"]}
+                )
                 if new_params != step["params"]:
                     step["params"] = new_params
                 if step["type"] == "align":

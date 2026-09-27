@@ -22,11 +22,16 @@ def apply(image: np.ndarray, params: dict) -> np.ndarray:
 def render_controls(params: dict, context: dict | None = None) -> dict:
     import streamlit as st
 
-    width = st.slider("Resize Width", 32, 1024, params["width"], step=16)
-    height = st.slider("Resize Height", 32, 1024, params["height"], step=16)
+    from image_processing.preprocessing.ui_widgets import slider_with_input
+
+    step_id = (context or {}).get("step_id", "")
+    # Step-scoped key prefixes — see crop.py's render_controls for why these are needed.
+    width = slider_with_input("Resize Width", 32, 1024, params["width"], 16, f"resize_w_{step_id}")
+    height = slider_with_input("Resize Height", 32, 1024, params["height"], 16, f"resize_h_{step_id}")
     interpolation = st.selectbox(
         "Interpolation",
         list(_INTERPOLATIONS.keys()),
         index=list(_INTERPOLATIONS.keys()).index(params.get("interpolation", "area")),
+        key=f"resize_interp_{step_id}",
     )
     return {"width": width, "height": height, "interpolation": interpolation}
