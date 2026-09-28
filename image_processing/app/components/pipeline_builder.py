@@ -23,9 +23,9 @@ from image_processing.core import repository as repo
 from image_processing.core.config_schema import PipelineStep, PreprocessConfig
 from image_processing.core.hashing import stable_hash
 from image_processing.core.store import read_json, write_json
-from image_processing.preprocessing import align, pipeline
+from image_processing.preprocessing import align, crop, pipeline
 from image_processing.preprocessing.registry import TOOL_LABELS, TOOLS, get_tool
-from image_processing.preprocessing.ui_widgets import slider_with_input
+from image_processing.preprocessing.ui_widgets import dynamic_bounded_slider
 
 STEPS_KEY = "pp_steps"
 CATEGORIES_KEY = "pp_categories"
@@ -81,7 +81,33 @@ def _sample_image(project, categories: list[str]) -> tuple[str | None, "np.ndarr
     current = st.session_state.get(SAMPLE_KEY, ids[0])
     if current not in ids:
         current = ids[0]
-    chosen = st.selectbox("Preview sample image", ids, index=ids.index(current), key=SAMPLE_KEY)
+    current_index = ids.index(current)
+
+    chosen = st.selectbox("Preview sample image", ids, index=current_index, key=SAMPLE_KEY)
+
+    # Previous/Next mutate SAMPLE_KEY via on_click callbacks rather than an inline
+    # `if st.button(): ...`. Callbacks run in Streamlit's pre-script phase, before the
+    # script body (and therefore the selectbox above) re-executes — an inline check would
+    # instead run *after* the selectbox has already been instantiated this same script
+    # pass (since the buttons are placed below it), and Streamlit forbids writing to a
+    # widget's session_state key once that widget is already instantiated in the same run.
+    def _step(offset: int) -> None:
+        new_index = current_index + offset
+        if 0 <= new_index < len(ids):
+            st.session_state[SAMPLE_KEY] = ids[new_index]
+
+    prev_col, next_col = st.columns(2)
+    with prev_col:
+        st.button(
+            "Previous", icon=":material/chevron_left:", key="pp_sample_prev", width="stretch",
+            disabled=current_index == 0, on_click=_step, args=(-1,),
+        )
+    with next_col:
+        st.button(
+            "Next", icon=":material/chevron_right:", key="pp_sample_next", width="stretch",
+            disabled=current_index == len(ids) - 1, on_click=_step, args=(1,),
+        )
+
     image = pipeline.load_image(repo.image_path(project, chosen))
     return chosen, image
 
@@ -97,36 +123,55 @@ def _render_align_landmark_manager(project, step: dict, steps: list[dict], sampl
     ref_image = pipeline.load_image(repo.image_path(project, ref_id))
     rh, rw = ref_image.shape[:2]
 
+    # Tracks the in-progress landmark pick across reruns, independent of the widgets' own
+    # session_state keys. dynamic_bounded_slider needs this: since the position sliders'
+    # bounds are recomputed from Width/Height every render, their `value=` fallback must
+    # come from a source that isn't itself reset by that bounds change — see its docstring
+    # for why reading the widgets' own keys back wouldn't work here.
+    pending_key = f"lm_pending_{step['id']}"
+    pending = st.session_state.setdefault(
+        pending_key, {"w": max(8, min(40, rw)), "h": max(8, min(40, rh)), "cx": rw // 2, "cy": rh // 2}
+    )
+
     col1, col2 = st.columns(2)
-    with col1:
-        st.image(ref_image, caption="Reference image", width="stretch")
     with col2:
         # step["id"]-scoped prefixes so two separate align steps don't share landmark-picker
-        # state, and slider_with_input for a linked text-entry box on each — see
-        # preprocessing/crop.py's render_controls for why the key needs to be stable.
+        # state.
         #
-        # Width/height are sized FIRST, against the full image dimensions — independent of
-        # X/Y. Only after the size is set do X/Y get constrained (max = image size minus
-        # the chosen width/height) so the box can't be dragged off-image. The previous
-        # order did this backwards (width's max was `image width - x`), so moving X shrank
-        # the max allowed width and Streamlit silently clamped an already-chosen width down
-        # to fit — the box's *size* would change just from repositioning it. This way the
-        # dependency only ever runs one direction: resizing can nudge position back
-        # on-image if needed, but repositioning never touches size.
-        w = slider_with_input("Landmark Width", 8, max(8, rw), max(8, min(40, rw)), 1, f"lm_w_{step['id']}")
-        h = slider_with_input("Landmark Height", 8, max(8, rh), max(8, min(40, rh)), 1, f"lm_h_{step['id']}")
-        x = slider_with_input(
-            "Landmark X", 0, max(0, rw - w), min(rw // 4, max(0, rw - w)), 1, f"lm_x_{step['id']}"
+        # Width/Height are sized FIRST, against the full image dimensions — independent of
+        # position. Only after the size is set is the center X/Y position constrained —
+        # using crop.center_bounds/crop_box, the exact same region-positioning logic as the
+        # Crop tool, so a landmark region behaves identically and can never end up
+        # off-image. This one-way dependency means resizing can nudge position back
+        # on-image if it no longer fits, but repositioning never touches size.
+        w = dynamic_bounded_slider("Crop region width", 8, max(8, rw), pending["w"], 1, f"lm_w_{step['id']}")
+        h = dynamic_bounded_slider("Crop region height", 8, max(8, rh), pending["h"], 1, f"lm_h_{step['id']}")
+        min_cx, max_cx = crop.center_bounds(rw, w)
+        min_cy, max_cy = crop.center_bounds(rh, h)
+        cx = dynamic_bounded_slider(
+            "Region X position (center)", min_cx, max_cx, pending["cx"], 1, f"lm_cx_{step['id']}"
         )
-        y = slider_with_input(
-            "Landmark Y", 0, max(0, rh - h), min(rh // 4, max(0, rh - h)), 1, f"lm_y_{step['id']}"
+        cy = dynamic_bounded_slider(
+            "Region Y position (center)", min_cy, max_cy, pending["cy"], 1, f"lm_cy_{step['id']}"
         )
-        st.image(ref_image[y : y + h, x : x + w], caption="Landmark patch preview")
+        st.session_state[pending_key] = {"w": w, "h": h, "cx": cx, "cy": cy}
+
+    box_params = {"cx": cx, "cy": cy, "w": w, "h": h}
+    left, top, w, h = crop.crop_box((rh, rw), box_params)
+    with col1:
+        # Same overlay function the Crop tool uses on its Input image preview, reused here
+        # so a landmark region is outlined identically.
+        st.image(crop.draw_overlay(ref_image, box_params), caption="Reference image", width="stretch")
+    with col2:
+        st.image(ref_image[top : top + h, left : left + w], caption="Landmark patch preview")
         if st.button("Add landmark"):
-            landmark = align.make_landmark(ref_image, x, y, w, h)
+            # Landmarks are still stored top-left-corner-based (align.make_landmark's
+            # existing signature, and every downstream match_landmarks/apply consumer) —
+            # only this picker's UI is center-based, converted here at the point of adding.
+            landmark = align.make_landmark(ref_image, left, top, w, h)
             step["params"]["landmarks"] = [*step["params"].get("landmarks", []), landmark]
             _save_draft(project, steps)
-            st.success(f"Added landmark at ({x}, {y}), size {w}x{h}")
+            st.success(f"Added landmark at ({left}, {top}), size {w}x{h}")
 
     landmarks = step["params"].get("landmarks", [])
     if landmarks:
@@ -314,7 +359,14 @@ def render(project) -> dict | None:
             image_after = tool.apply(image_before, step["params"])
             with input_col:
                 st.caption("Input to this step")
-                st.image(image_before, width="stretch")
+                if step["type"] == "crop":
+                    # Outlines where the crop will land, using the exact same box-resolving
+                    # logic apply() uses — so the overlay can never drift out of sync with
+                    # what actually gets cropped. Overlay only ever affects this preview
+                    # copy, never the real image_before/image_after data.
+                    st.image(crop.draw_overlay(image_before, step["params"]), width="stretch")
+                else:
+                    st.image(image_before, width="stretch")
             with output_col:
                 st.caption("Output of this step")
                 st.image(image_after, width="stretch")

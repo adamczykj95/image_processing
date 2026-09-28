@@ -30,6 +30,11 @@ class Project:
         return self.root / "images" / "raw"
 
     @property
+    def thumbnails_dir(self) -> Path:
+        """Downscaled JPEG cache for gallery display — see core/thumbnails.py."""
+        return self.root / "images" / "thumbnails"
+
+    @property
     def preprocessing_configs_dir(self) -> Path:
         return self.root / "preprocessing" / "configs"
 
@@ -65,6 +70,7 @@ class Project:
         project = cls(root)
         for d in (
             project.images_raw_dir,
+            project.thumbnails_dir,
             project.preprocessing_configs_dir,
             project.preprocessing_cache_dir,
             project.runs_dir,

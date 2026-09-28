@@ -5,6 +5,7 @@ import streamlit as st
 from image_processing.app.state import require_project
 from image_processing.app.style import inject_global_css
 from image_processing.core import repository as repo
+from image_processing.core import thumbnails
 
 st.set_page_config(page_title="Label Images", page_icon="🏷️", layout="wide")
 inject_global_css()
@@ -216,7 +217,9 @@ for row_start in range(0, len(filtered), cols_per_row):
     cols = st.columns(cols_per_row)
     for col, (img, label_entry) in zip(cols, filtered[row_start : row_start + cols_per_row]):
         with col:
-            st.image(str(project.images_raw_dir / img["relpath"]), width="stretch")
+            source_path = project.images_raw_dir / img["relpath"]
+            thumb_path = thumbnails.get_thumbnail_path(project, img["id"], source_path)
+            st.image(str(thumb_path), width="stretch")
             st.checkbox("Select", key=_selection_key(img["id"]))
             label = st.radio(
                 "Label",
