@@ -64,8 +64,11 @@ with new_cat_col:
 with add_cat_col:
     if st.button("Add category", width="stretch"):
         if new_category_name.strip():
-            repo.create_category(project, new_category_name)
-            st.rerun()
+            try:
+                repo.create_category(project, new_category_name)
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
 
 if all_categories:
     for category in all_categories:

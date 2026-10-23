@@ -20,7 +20,8 @@ import uuid
 import streamlit as st
 
 from image_processing.core import repository as repo
-from image_processing.core.config_schema import PipelineStep, PreprocessConfig
+from image_processing.core import thumbnails
+from image_processing.core.config_schema import PipelineStep, PreprocessConfig, ScopeRule
 from image_processing.core.hashing import stable_hash
 from image_processing.core.store import read_json, write_json
 from image_processing.preprocessing import align, crop, pipeline
@@ -28,36 +29,53 @@ from image_processing.preprocessing.registry import TOOL_LABELS, TOOLS, get_tool
 from image_processing.preprocessing.ui_widgets import dynamic_bounded_slider
 
 STEPS_KEY = "pp_steps"
-CATEGORIES_KEY = "pp_categories"
+SCOPE_KEY = "pp_scope"
 SELECTED_KEY = "pp_selected_index"
 SAMPLE_KEY = "pp_sample_image_id"
+MAX_SCOPE_THUMBNAILS = 48
+
+
+def _new_rule(all_of: list[str] | None = None) -> dict:
+    # Draft rules carry an id (unlike ScopeRule) so their widgets get stable keys across
+    # add/delete — see the explicit-key note in _render_scope_builder.
+    return {"id": uuid.uuid4().hex[:8], "all_of": list(all_of or []), "none_of": []}
 
 
 def _load_draft(project) -> dict:
-    return read_json(project.draft_pipeline_path, default={"steps": [], "categories": []})
+    draft = read_json(project.draft_pipeline_path, default={"steps": []})
+    if "scope" not in draft:
+        # Drafts saved before scope rules existed hold a flat "has all of" category list.
+        legacy = draft.get("categories", [])
+        draft["scope"] = [_new_rule(legacy)] if legacy else []
+    return draft
 
 
 def _save_draft(project, steps: list[dict]) -> None:
-    # Reads categories from session_state rather than taking them as a parameter, so every
+    # Reads the scope from session_state rather than taking it as a parameter, so every
     # existing _save_draft(project, steps) call site (add/remove/reorder step, landmark
-    # edits, param changes) keeps working unchanged — categories are only ever mutated by
-    # their own multiselect in render(), never by any of those other call sites.
-    categories = st.session_state.get(CATEGORIES_KEY, [])
-    write_json(project.draft_pipeline_path, {"steps": steps, "categories": categories})
+    # edits, param changes) keeps working unchanged — the scope is only ever mutated by
+    # _render_scope_builder, never by any of those other call sites.
+    scope = st.session_state.get(SCOPE_KEY, [])
+    write_json(project.draft_pipeline_path, {"steps": steps, "scope": scope})
 
 
 def _steps(project) -> list[dict]:
     if STEPS_KEY not in st.session_state:
         draft = _load_draft(project)
         st.session_state[STEPS_KEY] = draft["steps"]
-        st.session_state[CATEGORIES_KEY] = draft.get("categories", [])
+        st.session_state[SCOPE_KEY] = draft["scope"]
     return st.session_state[STEPS_KEY]
 
 
-def _categories(project) -> list[str]:
-    if CATEGORIES_KEY not in st.session_state:
+def _scope_rules(project) -> list[dict]:
+    if SCOPE_KEY not in st.session_state:
         _steps(project)  # loads both keys together from the same draft file
-    return st.session_state[CATEGORIES_KEY]
+    return st.session_state[SCOPE_KEY]
+
+
+def _to_scope(rules: list[dict]) -> list[ScopeRule]:
+    # Going through PreprocessConfig's validator drops empty rules, same as on save.
+    return PreprocessConfig(scope=[ScopeRule(all_of=r["all_of"], none_of=r["none_of"]) for r in rules]).scope
 
 
 def _known_risky_order_warning(steps: list[dict]) -> str | None:
@@ -71,16 +89,17 @@ def _known_risky_order_warning(steps: list[dict]) -> str | None:
     return None
 
 
-def _sample_image(project, categories: list[str]) -> tuple[str | None, "np.ndarray | None"]:
-    images = [
-        img for img in repo.list_images(project) if repo.image_matches_categories(project, img["id"], categories)
-    ]
-    if not images:
+def _sample_image(project, scope: list[ScopeRule]) -> tuple[str | None, "np.ndarray | None"]:
+    ids = repo.filter_by_scope(project, [img["id"] for img in repo.list_images(project)], scope)
+    if not ids:
         return None, None
-    ids = [img["id"] for img in images]
     current = st.session_state.get(SAMPLE_KEY, ids[0])
     if current not in ids:
+        # The remembered sample was deleted (Import Images) or left the scope — reset the
+        # widget's own state too, not just the local, or the selectbox below would be
+        # handed a session_state value that isn't among its options.
         current = ids[0]
+        st.session_state[SAMPLE_KEY] = current
     current_index = ids.index(current)
 
     chosen = st.selectbox("Preview sample image", ids, index=current_index, key=SAMPLE_KEY)
@@ -119,6 +138,11 @@ def _render_align_landmark_manager(project, step: dict, steps: list[dict], sampl
     st.markdown("**Manage landmarks**")
     images = repo.list_images(project)
     ids = [img["id"] for img in images]
+    if not ids:
+        st.info("No images in the project — import some to pick landmarks from.")
+        return
+    if st.session_state.get("align_ref_image") not in (None, *ids):
+        st.session_state["align_ref_image"] = ids[0]  # remembered reference image was deleted
     ref_id = st.selectbox("Reference image", ids, key="align_ref_image")
     ref_image = pipeline.load_image(repo.image_path(project, ref_id))
     rh, rw = ref_image.shape[:2]
@@ -280,10 +304,10 @@ def _render_saved_config_list(project) -> None:
     for config_file in config_files:
         preproc_hash = config_file.stem
         nickname = names.get(preproc_hash, "")
-        config_categories = json.loads(config_file.read_text()).get("categories", [])
+        config_scope = PreprocessConfig.model_validate(json.loads(config_file.read_text())).scope
         with st.sidebar.expander(nickname or preproc_hash):
             st.caption(f"ID: `{preproc_hash}`")
-            st.caption(f"Categories: {', '.join(config_categories) if config_categories else '(all images)'}")
+            st.caption(f"Scope: {repo.format_scope(config_scope)}")
             new_name = st.text_input("Nickname", value=nickname, key=f"nickname_{preproc_hash}")
             if st.button("Save name", key=f"save_name_{preproc_hash}"):
                 repo.set_config_name(project, preproc_hash, new_name)
@@ -297,6 +321,81 @@ def _render_saved_config_list(project) -> None:
                 st.rerun()
 
 
+def _render_scope_builder(project, steps: list[dict]) -> list[ScopeRule]:
+    """Renders the rule list that decides which images this config (and training on it)
+    uses: an image is in scope if it matches ANY rule, and a rule matches images carrying
+    ALL of its first list and NONE of its second (see repository.categories_match_scope).
+    Returns the effective scope, with empty rules dropped."""
+    rules = _scope_rules(project)
+    options = [*repo.list_categories(project), repo.UNTAGGED]
+    all_ids = [img["id"] for img in repo.list_images(project)]
+    labels = repo.get_all_labels(project)
+    image_categories = {iid: labels.get(iid, {}).get("categories", []) for iid in all_ids}
+
+    st.markdown("**Images this config applies to**")
+    st.caption(
+        "Add rules to specify what images to apply the config to. "
+        "Within 1 rule, you can intersect categories. "
+        "Across 2+ rules, you can union categories."
+    )
+
+    for i, rule in enumerate(rules):
+        with st.container(border=True):
+            # Explicit, rule-id-scoped keys (not derived from `default=`) so a widget's
+            # identity survives reruns and deleting another rule — otherwise edits get
+            # dropped on the first change, the same bug fixed for the preprocessing sliders.
+            all_col, none_col, count_col, del_col = st.columns([4, 4, 1, 1], vertical_alignment="bottom")
+            with all_col:
+                all_of = st.multiselect(
+                    "Intersect Categories",
+                    options,
+                    default=[c for c in rule["all_of"] if c in options],
+                    key=f"scope_all_{rule['id']}",
+                )
+            with none_col:
+                none_of = st.multiselect(
+                    "Subtract Categories",
+                    options,
+                    default=[c for c in rule["none_of"] if c in options],
+                    key=f"scope_none_{rule['id']}",
+                )
+            if all_of != rule["all_of"] or none_of != rule["none_of"]:
+                rule["all_of"], rule["none_of"] = all_of, none_of
+                _save_draft(project, steps)
+            rule_scope = _to_scope([rule])
+            with count_col:
+                if rule_scope:
+                    matched = sum(repo.categories_match_scope(c, rule_scope) for c in image_categories.values())
+                    st.metric("Images", matched, label_visibility="collapsed")
+                else:
+                    st.caption("empty")
+            with del_col:
+                if st.button("", icon=":material/close:", key=f"scope_del_{rule['id']}", help="Remove rule"):
+                    rules.pop(i)
+                    _save_draft(project, steps)
+                    st.rerun()
+
+    if st.button("Add rule", icon=":material/add:"):
+        rules.append(_new_rule())
+        _save_draft(project, steps)
+        st.rerun()
+
+    scope = _to_scope(rules)
+    matching = [iid for iid in all_ids if repo.categories_match_scope(image_categories[iid], scope)]
+    st.caption(f"**{len(matching)} of {len(all_ids)} images** match: {repo.format_scope(scope)}")
+    if scope and matching:
+        with st.expander("Show matching images"):
+            shown = matching[:MAX_SCOPE_THUMBNAILS]
+            st.image(
+                [str(thumbnails.get_thumbnail_path(project, iid, repo.image_path(project, iid))) for iid in shown],
+                caption=shown,
+                width=120,
+            )
+            if len(matching) > len(shown):
+                st.caption(f"…and {len(matching) - len(shown)} more.")
+    return scope
+
+
 def render(project) -> dict | None:
     """Renders the full pipeline builder UI. Returns the build_cache report after 'Apply', else None.
 
@@ -306,35 +405,20 @@ def render(project) -> dict | None:
     rerun, since the list would already have been drawn from the pre-build state of disk.
     """
     steps = _steps(project)
-    categories = _categories(project)
     selected = _render_sidebar_chain(project, steps)
 
-    all_categories = repo.list_categories(project)
-    new_categories = st.multiselect(
-        "Categories this config applies to",
-        all_categories,
-        default=[c for c in categories if c in all_categories],
-        key="pp_categories_widget",
-        help="Leave empty to apply this config to all images. Select one or more to scope "
-        "it (and, later, training) to only images tagged with those categories — e.g. a "
-        "separate preprocessing chain for each product type. Create categories on the "
-        "Label Images page.",
-    )
-    if new_categories != categories:
-        st.session_state[CATEGORIES_KEY] = new_categories
-        _save_draft(project, steps)
-        categories = new_categories
+    scope = _render_scope_builder(project, steps)
 
     report = None
     if not steps:
         st.info("No steps yet — add a tool in the sidebar to start building your preprocessing chain.")
     else:
-        sample_id, sample_image = _sample_image(project, categories)
+        sample_id, sample_image = _sample_image(project, scope)
         if sample_image is None:
-            if categories and repo.list_images(project):
+            if scope and repo.list_images(project):
                 st.info(
-                    "No images match the selected categories yet — assign categories on "
-                    "the Label Images page, or clear the selection above to preview all images."
+                    "No images match the scope rules yet — assign categories on the Label "
+                    "Images page, or remove the rules above to preview all images."
                 )
             else:
                 st.info("Import images to enable preview.")
@@ -367,9 +451,11 @@ def render(project) -> dict | None:
                     st.image(crop.draw_overlay(image_before, step["params"]), width="stretch")
                 else:
                     st.image(image_before, width="stretch")
+                st.caption(f"{image_before.shape[1]} × {image_before.shape[0]} px (width × height)")
             with output_col:
                 st.caption("Output of this step")
                 st.image(image_after, width="stretch")
+                st.caption(f"{image_after.shape[1]} × {image_after.shape[0]} px (width × height)")
 
             # Catches param-only changes (sliders, landmark additions) that don't go
             # through an explicit st.rerun() above and so wouldn't otherwise hit a save point.
@@ -383,7 +469,7 @@ def render(project) -> dict | None:
             # This is the same tool chain/hash regardless of which step type is currently
             # selected, so one nickname box covers every tool, not a per-tool control.
             pending_hash = stable_hash(
-                PreprocessConfig(steps=[PipelineStep(**s) for s in steps], categories=categories).model_dump()
+                PreprocessConfig(steps=[PipelineStep(**s) for s in steps], scope=scope).model_dump()
             )
             existing_nickname = repo.get_config_name(project, pending_hash) or ""
             nickname_key = f"pending_nickname_{pending_hash}"
@@ -394,7 +480,7 @@ def render(project) -> dict | None:
             # the fact — but it does mean we must read st.session_state[nickname_key]
             # directly here rather than a local variable the text_input call would return.
             if st.button("Apply to project", type="primary", width="stretch"):
-                config = PreprocessConfig(steps=[PipelineStep(**s) for s in steps], categories=categories)
+                config = PreprocessConfig(steps=[PipelineStep(**s) for s in steps], scope=scope)
                 report = pipeline.build_cache(project, config)
                 repo.set_config_name(project, report["preproc_hash"], st.session_state.get(nickname_key, ""))
             st.text_input(

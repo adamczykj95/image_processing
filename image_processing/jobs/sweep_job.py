@@ -66,22 +66,10 @@ def _dataset_for_config(project: Project, preprocess_config: PreprocessConfig) -
     # scopes (a fork config and a spoon config), so the train/val image sets must be
     # resolved per-config, not once globally — mirrors _image_size_for_hash above for the
     # same underlying reason.
-    categories = preprocess_config.categories
-    train_ids = [
-        iid
-        for iid in repo.list_by_label_and_split(project, "good", "train")
-        if repo.image_matches_categories(project, iid, categories)
-    ]
-    val_good_ids = [
-        iid
-        for iid in repo.list_by_label_and_split(project, "good", "val")
-        if repo.image_matches_categories(project, iid, categories)
-    ]
-    val_anomaly_ids = [
-        iid
-        for iid in repo.list_by_label_and_split(project, "anomaly", "val")
-        if repo.image_matches_categories(project, iid, categories)
-    ]
+    scope = preprocess_config.scope
+    train_ids = repo.filter_by_scope(project, repo.list_by_label_and_split(project, "good", "train"), scope)
+    val_good_ids = repo.filter_by_scope(project, repo.list_by_label_and_split(project, "good", "val"), scope)
+    val_anomaly_ids = repo.filter_by_scope(project, repo.list_by_label_and_split(project, "anomaly", "val"), scope)
     return train_ids, val_good_ids, val_anomaly_ids
 
 

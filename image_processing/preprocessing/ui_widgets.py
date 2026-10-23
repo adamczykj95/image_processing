@@ -5,7 +5,7 @@ each widget is bound to session_state via its own `key` and takes no `value=` ar
 there's a single source of truth instead of two independently-tracked values that could
 drift apart.
 """
-from typing import Any
+from typing import Any, Callable
 
 import streamlit as st
 
@@ -18,7 +18,11 @@ def slider_with_input(
     step: Any,
     key_prefix: str,
     format: str | None = None,
+    on_change: Callable[[Any], None] | None = None,
 ) -> Any:
+    """`on_change`, if given, is called with the new value after the user drags or types —
+    from inside the widget callback, so it may write other widgets' session_state keys
+    (e.g. to link two sliders) before those widgets render on the rerun."""
     slider_key = f"{key_prefix}_slider"
     number_key = f"{key_prefix}_number"
 
@@ -29,9 +33,13 @@ def slider_with_input(
 
     def _sync_to_number() -> None:
         st.session_state[number_key] = st.session_state[slider_key]
+        if on_change:
+            on_change(st.session_state[slider_key])
 
     def _sync_to_slider() -> None:
         st.session_state[slider_key] = st.session_state[number_key]
+        if on_change:
+            on_change(st.session_state[number_key])
 
     slider_col, number_col = st.columns([3, 1])
     with slider_col:

@@ -20,3 +20,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["image_processing*"]
+
+[tool.setuptools.package-data]
+"image_processing.app.components" = ["image_select_grid_frontend/*.html"]

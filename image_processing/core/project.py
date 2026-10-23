@@ -60,6 +60,12 @@ class Project:
         return self.root / "runs"
 
     @property
+    def run_names_path(self) -> Path:
+        """User-assigned names for runs: {run_id: name}. Also the default file name for a
+        run's downloaded checkpoint. A plain file, so list_runs' directory scan skips it."""
+        return self.runs_dir / "run_names.json"
+
+    @property
     def sweeps_dir(self) -> Path:
         return self.root / "sweeps"
 

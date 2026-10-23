@@ -2,6 +2,7 @@
 from pathlib import Path
 from datetime import datetime, timezone
 
+from image_processing.core.config_schema import ScopeRule
 from image_processing.core.project import Project
 from image_processing.core.store import read_json, write_json
 
@@ -40,6 +41,53 @@ def add_image(project: Project, image_id: str, relpath: str, width: int, height:
         {"label": "unlabeled", "split": "unassigned", "labeled_at": None, "notes": "", "categories": []},
     )
     save_catalog(project, catalog)
+
+
+def delete_images(project: Project, image_ids: list[str]) -> int:
+    """Removes images from the project entirely, in one catalog read-modify-write: their
+    catalog + label entries, raw files, gallery thumbnails, and processed copies (plus
+    manifest entries) in every preprocessing cache. Returns how many were deleted.
+
+    The label entry must go too, not just the image entry — list_by_label /
+    list_by_label_and_split (and so Train/Validate and Sweep dataset selection) iterate
+    catalog["labels"], so a leftover entry would keep a deleted image in training sets.
+    Past runs are left untouched: their metrics describe the data they were trained on,
+    and the Train/Validate results grid skips images whose processed file is gone.
+    """
+    to_delete = set(image_ids)
+    catalog = load_catalog(project)
+    deleted = [img for img in catalog["images"] if img["id"] in to_delete]
+    if not deleted:
+        return 0
+    catalog["images"] = [img for img in catalog["images"] if img["id"] not in to_delete]
+    for img in deleted:
+        catalog["labels"].pop(img["id"], None)
+    save_catalog(project, catalog)
+
+    for img in deleted:
+        (project.images_raw_dir / img["relpath"]).unlink(missing_ok=True)
+        (project.thumbnails_dir / f"{img['id']}.jpg").unlink(missing_ok=True)
+
+    if project.preprocessing_cache_dir.exists():
+        for cache_dir in project.preprocessing_cache_dir.iterdir():
+            if not cache_dir.is_dir():
+                continue
+            for img in deleted:
+                for label in ("good", "anomaly"):
+                    (cache_dir / label / f"{img['id']}.png").unlink(missing_ok=True)
+            manifest_path = cache_dir / "manifest.json"
+            manifest = read_json(manifest_path, default={})
+            if any(img["id"] in manifest for img in deleted):
+                for img in deleted:
+                    manifest.pop(img["id"], None)
+                write_json(manifest_path, manifest)
+
+    meta = project.meta()
+    if meta.get("reference_image_id") in to_delete:
+        meta["reference_image_id"] = None
+        write_json(project.project_json_path, meta)
+
+    return len(deleted)
 
 
 def list_images(project: Project) -> list[dict]:
@@ -166,6 +214,32 @@ def list_runs(project: Project) -> list[dict]:
     return runs
 
 
+def find_checkpoint(project: Project, run_id: str) -> Path | None:
+    """The run's trained model checkpoint (.ckpt), or None if it has none (failed/in progress).
+
+    Prefers the path train.py recorded in metrics.json, but falls back to searching the run
+    directory: that recorded path is absolute, so it goes stale if the project is moved."""
+    run_dir = project.runs_dir / run_id
+    recorded = read_json(run_dir / "metrics.json", default={}).get("ckpt_path")
+    if recorded and Path(recorded).exists():
+        return Path(recorded)
+    candidates = sorted(run_dir.rglob("*.ckpt")) if run_dir.exists() else []
+    return candidates[0] if candidates else None
+
+
+def load_run_names(project: Project) -> dict[str, str]:
+    return read_json(project.run_names_path, default={})
+
+
+def set_run_name(project: Project, run_id: str, name: str) -> None:
+    names = load_run_names(project)
+    if name.strip():
+        names[run_id] = name.strip()
+    else:
+        names.pop(run_id, None)
+    write_json(project.run_names_path, names)
+
+
 def list_sweeps(project: Project) -> list[dict]:
     sweeps = []
     if not project.sweeps_dir.exists():
@@ -212,6 +286,10 @@ def delete_config_name(project: Project, preproc_hash: str) -> None:
 
 # -- image categories: orthogonal, multi-valued tags independent of label/split ------
 
+# Pseudo-category usable in scope rules (never stored on images or in the category list):
+# an image with no categories is treated as carrying exactly this one.
+UNTAGGED = "(untagged)"
+
 
 def list_categories(project: Project) -> list[str]:
     return load_catalog(project)["categories"]
@@ -221,6 +299,8 @@ def create_category(project: Project, name: str) -> None:
     name = name.strip()
     if not name:
         return
+    if name == UNTAGGED:
+        raise ValueError(f"'{UNTAGGED}' is reserved for images with no categories.")
     catalog = load_catalog(project)
     if name not in catalog["categories"]:
         catalog["categories"].append(name)
@@ -267,11 +347,41 @@ def add_category_to_images(project: Project, category: str, image_ids: list[str]
     save_catalog(project, catalog)
 
 
-def image_matches_categories(project: Project, image_id: str, categories: list[str]) -> bool:
-    """True if `categories` is empty (no scope = matches everything) or the image has at
-    least one of the given categories (OR match, not AND — requiring all of a config's
-    categories wouldn't make sense for e.g. a shared fork+spoon config)."""
-    if not categories:
+def categories_match_scope(image_categories: list[str], scope: list[ScopeRule]) -> bool:
+    """True if `scope` is empty (no scope = matches everything) or the image matches ANY
+    rule, where a rule matches if the image carries every category in its `all_of` and none
+    in its `none_of`. An image with no categories counts as carrying UNTAGGED.
+
+    Rules union; within a rule, all_of intersects and none_of subtracts — so any
+    union/intersection/difference/complement of categories is expressible. E.g. with
+    independent axes (fork/spoon, optical/x-ray), all_of=[spoon, x-ray] none_of=[damaged]
+    selects undamaged x-ray images of spoons. This is the single source of truth for
+    category-scope matching — used by preprocessing cache building, the Preprocessing
+    page's preview, and Train/Validate + Sweep dataset scoping."""
+    if not scope:
         return True
-    image_categories = set(get_label(project, image_id).get("categories", []))
-    return bool(image_categories & set(categories))
+    tags = set(image_categories) or {UNTAGGED}
+    return any(set(rule.all_of) <= tags and not (set(rule.none_of) & tags) for rule in scope)
+
+
+def filter_by_scope(project: Project, image_ids: list[str], scope: list[ScopeRule]) -> list[str]:
+    """The subset of image_ids (order preserved) matching `scope`, from one catalog read."""
+    if not scope:
+        return list(image_ids)
+    labels = get_all_labels(project)
+    return [
+        iid for iid in image_ids if categories_match_scope(labels.get(iid, {}).get("categories", []), scope)
+    ]
+
+
+def format_scope(scope: list[ScopeRule]) -> str:
+    """Human-readable set expression for a scope, e.g. "(spoon ∩ x-ray − damaged) ∪ fork"."""
+    if not scope:
+        return "all images"
+    parts = []
+    for rule in scope:
+        text = " ∩ ".join(rule.all_of) if rule.all_of else "all images"
+        if rule.none_of:
+            text += " − " + " − ".join(rule.none_of)
+        parts.append(f"({text})" if len(scope) > 1 and (len(rule.all_of) > 1 or rule.none_of) else text)
+    return " ∪ ".join(parts)

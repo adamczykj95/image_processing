@@ -1,0 +1,162 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!--
+  Thumbnail grid with click / Shift+click multi-select, for image_select_grid.py.
+  Plain HTML/JS speaking Streamlit's component postMessage protocol directly (no npm
+  build step). Python owns the selection: each click sends the full new selection plus a
+  unique event id, and Python echoes back the last event it applied. Incoming `selected`
+  args are ignored while a click this frame sent hasn't been echoed yet — otherwise a
+  render still in flight from an earlier click would overwrite (and so drop) a newer one.
+-->
+<style>
+  :root { --primary: #ff4b4b; --text: #31333f; --bg: #ffffff; --font: sans-serif; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body { font-family: var(--font); color: var(--text); }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(var(--cols, 6), minmax(0, 1fr));
+    gap: 12px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .tile {
+    position: relative;
+    padding: 4px;
+    border: 2px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .tile:hover { border-color: color-mix(in srgb, var(--text) 25%, transparent); }
+  .tile.sel {
+    border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 14%, transparent);
+  }
+  /* Square image corners on purpose — see app/style.py: rounding hides edge pixels. */
+  .tile img { display: block; width: 100%; height: auto; }
+  .box {
+    position: absolute; top: 10px; left: 10px;
+    width: 18px; height: 18px; box-sizing: border-box;
+    border: 2px solid #fff; border-radius: 4px;
+    background: rgba(0, 0, 0, 0.35);
+    box-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+  }
+  .tile.sel .box { background: var(--primary); border-color: var(--primary); }
+  .tile.sel .box::after {
+    content: ""; position: absolute; left: 4px; top: 0px;
+    width: 5px; height: 10px;
+    border: solid #fff; border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+  .cap {
+    margin-top: 4px; font-size: 12px; opacity: 0.75;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<div class="grid" id="grid"></div>
+<script>
+  const grid = document.getElementById("grid");
+  let items = [];
+  let tiles = new Map();          // id -> tile element
+  let selected = new Set();
+  let anchorId = null;            // last plain-clicked (or shift-clicked) image
+  let builtKey = null;
+  let pendingEvent = null;        // last event id sent and not yet echoed back by Python
+
+  function send(type, data) {
+    window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, data), "*");
+  }
+
+  function setHeight() {
+    send("streamlit:setFrameHeight", { height: document.documentElement.scrollHeight });
+  }
+
+  function applyTheme(theme) {
+    if (!theme) return;
+    const root = document.documentElement.style;
+    if (theme.primaryColor) root.setProperty("--primary", theme.primaryColor);
+    if (theme.textColor) root.setProperty("--text", theme.textColor);
+    if (theme.font) root.setProperty("--font", theme.font);
+  }
+
+  function paint() {
+    for (const [id, tile] of tiles) tile.classList.toggle("sel", selected.has(id));
+  }
+
+  function build(newItems, columns) {
+    items = newItems;
+    grid.style.setProperty("--cols", columns);
+    grid.replaceChildren();
+    tiles = new Map();
+    items.forEach((item, index) => {
+      const tile = document.createElement("div");
+      tile.className = "tile";
+      tile.title = item.caption;
+      const img = document.createElement("img");
+      img.src = item.src;
+      img.alt = item.caption;
+      img.draggable = false;
+      img.addEventListener("load", setHeight);
+      const box = document.createElement("div");
+      box.className = "box";
+      const cap = document.createElement("div");
+      cap.className = "cap";
+      cap.textContent = item.caption;
+      tile.append(img, box, cap);
+      // Stop the browser's own shift+click text-range selection.
+      tile.addEventListener("mousedown", (e) => { if (e.shiftKey) e.preventDefault(); });
+      tile.addEventListener("click", (e) => onClick(e, index));
+      grid.appendChild(tile);
+      tiles.set(item.id, tile);
+    });
+    if (anchorId !== null && !tiles.has(anchorId)) anchorId = null;
+  }
+
+  function onClick(e, index) {
+    const id = items[index].id;
+    const anchorIndex = anchorId === null ? -1 : items.findIndex((it) => it.id === anchorId);
+    if (e.shiftKey && anchorIndex !== -1) {
+      // Shift+click repeats the anchor's current state (selected or not) over the whole
+      // range, so it can bulk-deselect as well as bulk-select.
+      const value = selected.has(anchorId);
+      const [lo, hi] = anchorIndex < index ? [anchorIndex, index] : [index, anchorIndex];
+      for (let i = lo; i <= hi; i++) {
+        if (value) selected.add(items[i].id); else selected.delete(items[i].id);
+      }
+    } else {
+      if (selected.has(id)) selected.delete(id); else selected.add(id);
+      anchorId = id;
+    }
+    paint();
+    pendingEvent = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    send("streamlit:setComponentValue", {
+      value: { event: pendingEvent, selected: [...selected] },
+      dataType: "json",
+    });
+  }
+
+  window.addEventListener("message", (e) => {
+    if (!e.data || e.data.type !== "streamlit:render") return;
+    const args = e.data.args;
+    applyTheme(e.data.theme);
+    const key = args.columns + "|" + args.items.map((it) => it.id + ":" + it.caption).join(",");
+    if (key !== builtKey) {
+      build(args.items, args.columns);
+      builtKey = key;
+    }
+    if (pendingEvent === null || args.applied_event === pendingEvent) {
+      pendingEvent = null;
+      selected = new Set(args.selected);
+    }
+    paint();
+    setHeight();
+  });
+
+  new ResizeObserver(setHeight).observe(document.body);
+  send("streamlit:componentReady", { apiVersion: 1 });
+</script>
+</body>
+</html>

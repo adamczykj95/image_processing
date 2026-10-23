@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from image_processing.app.components import checkpoint_download
 from image_processing.app.components.heatmap import overlay_heatmap
 from image_processing.app.state import require_project
 from image_processing.app.style import inject_global_css
@@ -39,26 +40,15 @@ preprocess_config = PreprocessConfig.model_validate(
 )
 
 # The preprocessing config carries its category scope, so selecting it also selects the
-# dataset — no separate category picker needed here. Empty categories = matches every image
-# (repository.image_matches_categories), preserving today's behavior for unscoped configs.
-train_ids = [
-    iid
-    for iid in repo.list_by_label_and_split(project, "good", "train")
-    if repo.image_matches_categories(project, iid, preprocess_config.categories)
-]
-val_good_ids = [
-    iid
-    for iid in repo.list_by_label_and_split(project, "good", "val")
-    if repo.image_matches_categories(project, iid, preprocess_config.categories)
-]
-val_anomaly_ids = [
-    iid
-    for iid in repo.list_by_label_and_split(project, "anomaly", "val")
-    if repo.image_matches_categories(project, iid, preprocess_config.categories)
-]
+# dataset — no separate category picker needed here. Empty scope = matches every image
+# (repository.categories_match_scope), preserving today's behavior for unscoped configs.
+scope = preprocess_config.scope
+train_ids = repo.filter_by_scope(project, repo.list_by_label_and_split(project, "good", "train"), scope)
+val_good_ids = repo.filter_by_scope(project, repo.list_by_label_and_split(project, "good", "val"), scope)
+val_anomaly_ids = repo.filter_by_scope(project, repo.list_by_label_and_split(project, "anomaly", "val"), scope)
 
-if preprocess_config.categories:
-    st.caption(f"Scoped to categories: {', '.join(preprocess_config.categories)}")
+if scope:
+    st.caption(f"Scoped to: {repo.format_scope(scope)}")
 
 st.write(
     f"Train (good): **{len(train_ids)}** &nbsp;·&nbsp; "
@@ -162,11 +152,19 @@ if not runs:
 
 run_ids = [r["id"] for r in runs]
 default_run = st.session_state.get("last_run_id", run_ids[-1])
-selected_run_id = st.selectbox("Run", run_ids, index=run_ids.index(default_run) if default_run in run_ids else len(run_ids) - 1)
+run_names = repo.load_run_names(project)
+selected_run_id = st.selectbox(
+    "Run",
+    run_ids,
+    index=run_ids.index(default_run) if default_run in run_ids else len(run_ids) - 1,
+    format_func=lambda rid: f"{run_names[rid]} ({rid})" if rid in run_names else rid,
+)
 run = next(r for r in runs if r["id"] == selected_run_id)
 run_dir = project.runs_dir / selected_run_id
 
 st.write(f"Status: **{run['status'].get('state')}** — {run['status'].get('message', '')}")
+if run["status"].get("state") == "done":
+    checkpoint_download.render(project, selected_run_id, key_prefix="tv")
 
 predictions_path = run_dir / "predictions.csv"
 if run["status"].get("state") == "done" and predictions_path.exists():
@@ -210,9 +208,24 @@ if run["status"].get("state") == "done" and predictions_path.exists():
 
     df = ml_metrics.load_predictions(predictions_path)
     cache_for_run = project.preprocessing_cache_dir / run["config"]["preproc_hash"]
+    # Images deleted since this run was trained (Import Images) no longer have a processed
+    # file — skip them rather than crash. The metrics above still include them, since
+    # they describe the data the model was actually evaluated on.
+    df["label_dir"] = df["gt_label"].map(lambda gt: "anomaly" if gt == 1 else "good")
+    present = pd.Series(
+        [(cache_for_run / d / f"{iid}.png").exists() for d, iid in zip(df["label_dir"], df["image_id"])],
+        index=df.index,
+        dtype=bool,
+    )
+    if not present.all():
+        st.caption(
+            f"{int((~present).sum())} image(s) from this run have since been deleted and are not shown "
+            "below; the metrics above still include them."
+        )
+    df = df[present].reset_index(drop=True)
     cols = st.columns(4)
     for i, row in df.iterrows():
-        label_dir = "anomaly" if row["gt_label"] == 1 else "good"
+        label_dir = row["label_dir"]
         image_path = cache_for_run / label_dir / f"{row['image_id']}.png"
         with cols[i % 4]:
             base_image = load_image(image_path)

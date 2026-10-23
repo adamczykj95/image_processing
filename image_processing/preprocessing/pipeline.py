@@ -69,12 +69,9 @@ def build_cache(
     catalog_images = repo.list_images(project)
     if image_ids is not None:
         catalog_images = [img for img in catalog_images if img["id"] in image_ids]
-    if preprocess_config.categories:
-        catalog_images = [
-            img
-            for img in catalog_images
-            if repo.image_matches_categories(project, img["id"], preprocess_config.categories)
-        ]
+    if preprocess_config.scope:
+        in_scope = set(repo.filter_by_scope(project, [img["id"] for img in catalog_images], preprocess_config.scope))
+        catalog_images = [img for img in catalog_images if img["id"] in in_scope]
 
     warnings: list[str] = []
     output_sizes: set[tuple[int, int]] = set()

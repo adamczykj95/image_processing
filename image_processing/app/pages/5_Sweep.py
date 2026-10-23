@@ -1,6 +1,7 @@
 import pandas as pd
 import streamlit as st
 
+from image_processing.app.components import checkpoint_download
 from image_processing.app.components.sweep_builder import render_grid_form
 from image_processing.app.state import require_project
 from image_processing.app.style import inject_global_css
@@ -55,6 +56,7 @@ if results_path.exists():
     df = pd.read_csv(results_path)
     config_names = repo.load_config_names(project)
     df.insert(0, "config", df["preproc_hash"].map(lambda h: config_names.get(h, h)))
+    run_names = repo.load_run_names(project)
 
     # st.dataframe can't embed interactive buttons in a cell, so the table is built row by
     # row from st.columns instead — this is what lets "View" live inside the table itself
@@ -85,7 +87,7 @@ if results_path.exists():
             st.session_state["last_run_id"] = row["run_id"]
             st.switch_page("pages/4_Train_Validate.py")
         cols[1].write(row["config"])
-        cols[2].write(f"`{row['run_id']}`")
+        cols[2].write(f"{run_names[row['run_id']]} (`{row['run_id']}`)" if row["run_id"] in run_names else f"`{row['run_id']}`")
         cols[3].write(row["backbone"])
         cols[4].write(row["layers"])
         cols[5].write(row["coreset_sampling_ratio"])
@@ -96,5 +98,19 @@ if results_path.exists():
         cols[10].write(row["recall_anomaly"])
         cols[11].write(row["n_predictions"])
         cols[12].write(row["status"])
+
+    st.divider()
+    st.subheader("Download a model checkpoint")
+    done_run_ids = df.loc[df["status"] == "done", "run_id"].tolist()
+    if done_run_ids:
+        download_run_id = st.selectbox(
+            "Run",
+            done_run_ids,
+            key=f"sweep_download_run_{selected_sweep_id}",
+            format_func=lambda rid: f"{run_names[rid]} ({rid})" if rid in run_names else rid,
+        )
+        checkpoint_download.render(project, download_run_id, key_prefix="sweep")
+    else:
+        st.caption("No successful runs in this sweep to download.")
 else:
     st.info("No results yet for this sweep.")
